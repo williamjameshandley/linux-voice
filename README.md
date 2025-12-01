@@ -204,6 +204,15 @@ sudo pacman -S sof-firmware
 
 Then reboot.
 
+### Vim
+
+Ctrl+Space (`C-@`) has a default behavior in vim insert mode (insert previously inserted text). Disable it by adding to your `.vimrc`:
+
+```vim
+" Disable Ctrl+Space insert mode behavior (for linux-voice)
+inoremap <C-@> <Nop>
+```
+
 ### Wayland
 
 xdotool has limited Wayland support. Consider using X11 or switching to ydotool.
