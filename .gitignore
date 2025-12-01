@@ -3,3 +3,8 @@ __pycache__/
 *.pyo
 .env
 .mcp_handley_lab/
+
+# makepkg build artifacts
+pkg/
+src/
+*.pkg.tar.zst
