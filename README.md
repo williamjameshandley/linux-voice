@@ -4,6 +4,14 @@ Voice-to-text dictation tool for Linux (X11) using OpenAI Whisper.
 
 Hold Ctrl+Space to record speech, release to transcribe and type into the focused window.
 
+## Requirements
+
+- Python 3.11+
+- Linux with X11 (Wayland has limited support)
+- PulseAudio/PipeWire
+- Working microphone
+- OpenAI API key
+
 ## Installation
 
 ```bash
@@ -14,7 +22,10 @@ sudo pacman -S xdotool
 pip install pynput sounddevice numpy openai
 ```
 
-Requires `OPENAI_API_KEY` environment variable.
+Set your OpenAI API key:
+```bash
+export OPENAI_API_KEY="your-key-here"
+```
 
 ## Usage
 
@@ -46,9 +57,16 @@ sample_rate = 48000
 language = "en"
 ```
 
-## Requirements
+## Privacy and Security
 
-- Linux with X11
-- PulseAudio/PipeWire
-- Working microphone
-- OpenAI API key
+**Audio is sent to OpenAI:** All recorded speech is transmitted to OpenAI's Whisper API for transcription. See [OpenAI's data usage policies](https://openai.com/policies/api-data-usage-policies).
+
+**Text is typed into the focused window:** Be careful not to dictate sensitive information while password fields or sensitive applications are focused. The transcribed text is typed using xdotool into whatever window has focus.
+
+## Cost
+
+OpenAI Whisper API costs $0.006 per minute of audio. A typical 10-second dictation costs ~$0.001.
+
+## License
+
+MIT
