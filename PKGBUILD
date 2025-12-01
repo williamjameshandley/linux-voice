@@ -13,6 +13,7 @@ depends=(
     'python-pynput'
     'python-sounddevice'
     'xdotool'
+    'ffmpeg'
 )
 optdepends=(
     'sof-firmware: for internal microphone support on modern AMD laptops'

@@ -35,9 +35,10 @@ paru -S linux-voice  # once published to AUR
 
 ```bash
 # System dependencies (Arch Linux)
-sudo pacman -S xdotool python-numpy python-pynput python-sounddevice python-openai
+sudo pacman -S xdotool ffmpeg python-numpy python-pynput python-sounddevice python-openai
 
-# Or with pip
+# Or with pip (still need system packages for xdotool and ffmpeg)
+sudo pacman -S xdotool ffmpeg
 pip install pynput sounddevice numpy openai
 ```
 
@@ -94,11 +95,18 @@ modifiers = ["ctrl"]
 mode = "hold"  # or "toggle"
 
 [audio]
-sample_rate = 48000
+sample_rate = 16000      # Whisper native rate (don't change unless needed)
+silence_threshold = 150  # RMS threshold for silence detection
 
 [transcription]
 language = "en"
+prompt = "British English academic dictation. Bayesian, cosmology, nested sampling."
 ```
+
+The `prompt` helps Whisper with:
+- British vs American spelling (colour, favour, organisation)
+- Domain-specific vocabulary (your field's jargon)
+- Consistent formatting and punctuation
 
 ## Privacy and Security
 

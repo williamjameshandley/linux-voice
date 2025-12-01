@@ -37,9 +37,10 @@ if CONFIG_PATH.exists():
         CONFIG = {}
 
 # Configuration with defaults
-SAMPLE_RATE = CONFIG.get("audio", {}).get("sample_rate", 48000)
+SAMPLE_RATE = CONFIG.get("audio", {}).get("sample_rate", 16000)  # Whisper native rate
 CHANNELS = 1
 LANGUAGE = CONFIG.get("transcription", {}).get("language", "en")
+PROMPT = CONFIG.get("transcription", {}).get("prompt", "British English.")
 MODE = os.environ.get(
     "LINUX_VOICE_MODE",
     CONFIG.get("hotkey", {}).get("mode", "hold"),
@@ -79,6 +80,11 @@ def check_environment():
     if not shutil.which("xdotool"):
         errors.append("xdotool not found. Install with: sudo pacman -S xdotool")
 
+    # Check for ffmpeg (optional but recommended for MP3 compression)
+    if not shutil.which("ffmpeg"):
+        print("\033[93mWarning: ffmpeg not found. Using uncompressed WAV (slower uploads).\033[0m")
+        print("Install with: sudo pacman -S ffmpeg\n")
+
     # Warn about Wayland
     session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
     if session_type == "wayland":
@@ -111,6 +117,10 @@ def _has_all_modifiers(pressed: set, required_types: set) -> bool:
     return True
 
 
+# Silence detection threshold (RMS value for 16-bit audio)
+SILENCE_THRESHOLD = CONFIG.get("audio", {}).get("silence_threshold", 150)
+
+
 class VoiceRecorder:
     def __init__(self):
         self.client = OpenAI()
@@ -119,6 +129,32 @@ class VoiceRecorder:
         self.stream = None
         self.pressed_modifiers = set()
         self.hotkey_pressed = False
+        self.has_ffmpeg = shutil.which("ffmpeg") is not None
+        self.last_transcript = ""  # Context for next transcription
+
+    def _convert_to_mp3(self, audio: np.ndarray) -> io.BytesIO:
+        """Convert numpy audio to MP3 using ffmpeg."""
+        command = [
+            "ffmpeg",
+            "-f", "s16le",
+            "-ar", str(SAMPLE_RATE),
+            "-ac", str(CHANNELS),
+            "-i", "pipe:0",
+            "-codec:a", "libmp3lame",
+            "-b:a", "32k",
+            "-f", "mp3",
+            "pipe:1",
+        ]
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        mp3_data, _ = process.communicate(input=audio.tobytes())
+        mp3_buffer = io.BytesIO(mp3_data)
+        mp3_buffer.name = "audio.mp3"
+        return mp3_buffer
 
     def start_recording(self):
         if self.recording:
@@ -176,28 +212,48 @@ class VoiceRecorder:
 
     def _transcribe_and_type(self, audio: np.ndarray):
         try:
-            # Save to WAV in memory
-            wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, "wb") as wf:
-                wf.setnchannels(CHANNELS)
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(SAMPLE_RATE)
-                wf.writeframes(audio.tobytes())
-            wav_buffer.seek(0)
-            wav_buffer.name = "audio.wav"
+            # Check for silence before sending
+            rms = np.sqrt(np.mean(audio.astype(np.float32) ** 2))
+            if rms < SILENCE_THRESHOLD:
+                print("(silence detected, skipping)")
+                return
+
+            # Convert to MP3 if ffmpeg available, otherwise WAV
+            if self.has_ffmpeg:
+                file_buffer = self._convert_to_mp3(audio)
+            else:
+                file_buffer = io.BytesIO()
+                with wave.open(file_buffer, "wb") as wf:
+                    wf.setnchannels(CHANNELS)
+                    wf.setsampwidth(2)  # 16-bit
+                    wf.setframerate(SAMPLE_RATE)
+                    wf.writeframes(audio.tobytes())
+                file_buffer.seek(0)
+                file_buffer.name = "audio.wav"
+
+            # Build prompt with base prompt and recent context
+            context = self.last_transcript[-200:] if self.last_transcript else ""
+            full_prompt = f"{PROMPT} {context}".strip()
 
             # Transcribe with OpenAI Whisper
             transcript = self.client.audio.transcriptions.create(
                 model="whisper-1",
-                file=wav_buffer,
+                file=file_buffer,
                 language=LANGUAGE,
+                prompt=full_prompt,
                 response_format="text",
+                temperature=0.0,
             )
 
             text = transcript.strip()
             if not text:
                 print("(no speech detected)")
                 return
+
+            # Update context for next transcription
+            self.last_transcript += " " + text
+            if len(self.last_transcript) > 1000:
+                self.last_transcript = self.last_transcript[-500:]
 
             print(f"\033[94m→ {text}\033[0m")
 
