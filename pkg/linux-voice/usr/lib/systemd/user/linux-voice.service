@@ -1,0 +1,17 @@
+[Unit]
+Description=Voice-to-text dictation tool
+Documentation=https://github.com/williamjameshandley/linux-voice
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/linux-voice
+Restart=on-failure
+RestartSec=5
+
+# Ensure access to audio and display
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=graphical-session.target
