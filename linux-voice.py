@@ -263,7 +263,7 @@ class VoiceRecorder:
                 check=False,
             )
             subprocess.run(
-                ["xdotool", "type", "--", text],
+                ["xdotool", "type", "--delay", "0", "--", text],
                 check=True,
             )
 
