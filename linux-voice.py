@@ -11,18 +11,46 @@ import os
 import subprocess
 import threading
 import wave
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 from openai import OpenAI
 from pynput import keyboard
 
-# Configuration
-SAMPLE_RATE = 48000  # Most devices support 48kHz
+# Load config from ~/.config/linux-voice/config.toml if it exists
+CONFIG = {}
+CONFIG_PATH = Path.home() / ".config" / "linux-voice" / "config.toml"
+if CONFIG_PATH.exists():
+    import tomllib
+    CONFIG = tomllib.loads(CONFIG_PATH.read_text())
+
+# Configuration with defaults
+SAMPLE_RATE = CONFIG.get("audio", {}).get("sample_rate", 48000)
 CHANNELS = 1
-HOTKEY_KEY = keyboard.Key.space
-HOTKEY_MODIFIERS = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
-MODE = os.environ.get("LINUX_VOICE_MODE", "hold")  # "hold" or "toggle"
+LANGUAGE = CONFIG.get("transcription", {}).get("language", "en")
+MODE = os.environ.get(
+    "LINUX_VOICE_MODE",
+    CONFIG.get("hotkey", {}).get("mode", "hold"),
+)
+
+# Hotkey configuration
+_hotkey_cfg = CONFIG.get("hotkey", {})
+_key_name = _hotkey_cfg.get("key", "space")
+HOTKEY_KEY = getattr(keyboard.Key, _key_name, keyboard.KeyCode.from_char(_key_name))
+_modifier_names = _hotkey_cfg.get("modifiers", ["ctrl"])
+HOTKEY_MODIFIERS = set()
+for mod in _modifier_names:
+    if mod == "ctrl":
+        HOTKEY_MODIFIERS.update({keyboard.Key.ctrl_l, keyboard.Key.ctrl_r})
+    elif mod == "alt":
+        HOTKEY_MODIFIERS.update({keyboard.Key.alt_l, keyboard.Key.alt_r})
+    elif mod == "shift":
+        HOTKEY_MODIFIERS.update({keyboard.Key.shift_l, keyboard.Key.shift_r})
+    elif mod == "super":
+        HOTKEY_MODIFIERS.update({keyboard.Key.cmd_l, keyboard.Key.cmd_r})
+if not HOTKEY_MODIFIERS:
+    HOTKEY_MODIFIERS = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
 
 
 class VoiceRecorder:
@@ -92,7 +120,7 @@ class VoiceRecorder:
             transcript = self.client.audio.transcriptions.create(
                 model="whisper-1",
                 file=wav_buffer,
-                language="en",
+                language=LANGUAGE,
                 response_format="text",
             )
 
