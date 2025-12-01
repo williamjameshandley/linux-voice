@@ -14,32 +14,73 @@ Hold Ctrl+Space to record speech, release to transcribe and type into the focuse
 
 ## Installation
 
-### Arch Linux (AUR)
+### Ubuntu/Debian
 
 ```bash
-# Install AUR dependencies first
-paru -S python-pynput python-sounddevice
+# System dependencies
+sudo apt install xdotool ffmpeg python3-pip python3-venv
 
-# Clone and build package
+# Create virtual environment (recommended)
+python3 -m venv ~/.local/share/linux-voice
+source ~/.local/share/linux-voice/bin/activate
+
+# Install Python packages
+pip install pynput sounddevice numpy openai
+
+# Download and install script
+curl -o ~/.local/bin/linux-voice https://raw.githubusercontent.com/williamjameshandley/linux-voice/main/linux-voice.py
+chmod +x ~/.local/bin/linux-voice
+```
+
+### Fedora
+
+```bash
+# System dependencies
+sudo dnf install xdotool ffmpeg python3-pip
+
+# Create virtual environment (recommended)
+python3 -m venv ~/.local/share/linux-voice
+source ~/.local/share/linux-voice/bin/activate
+
+# Install Python packages
+pip install pynput sounddevice numpy openai
+
+# Download and install script
+curl -o ~/.local/bin/linux-voice https://raw.githubusercontent.com/williamjameshandley/linux-voice/main/linux-voice.py
+chmod +x ~/.local/bin/linux-voice
+```
+
+### Arch Linux
+
+```bash
+# System dependencies
+sudo pacman -S xdotool ffmpeg python-numpy python-pynput python-sounddevice python-openai
+
+# Download and install script
+curl -o ~/.local/bin/linux-voice https://raw.githubusercontent.com/williamjameshandley/linux-voice/main/linux-voice.py
+chmod +x ~/.local/bin/linux-voice
+```
+
+Or build the package:
+
+```bash
 git clone https://github.com/williamjameshandley/linux-voice
 cd linux-voice
 makepkg -si
 ```
 
-Or with an AUR helper that handles dependencies:
-```bash
-paru -S linux-voice  # once published to AUR
-```
-
-### Manual Installation
+### pip (Any Distribution)
 
 ```bash
-# System dependencies (Arch Linux)
-sudo pacman -S xdotool ffmpeg python-numpy python-pynput python-sounddevice python-openai
+# Ensure system dependencies are installed first:
+# - xdotool (for typing text)
+# - ffmpeg (for audio compression, optional but recommended)
 
-# Or with pip (still need system packages for xdotool and ffmpeg)
-sudo pacman -S xdotool ffmpeg
 pip install pynput sounddevice numpy openai
+
+# Download script
+curl -o ~/.local/bin/linux-voice https://raw.githubusercontent.com/williamjameshandley/linux-voice/main/linux-voice.py
+chmod +x ~/.local/bin/linux-voice
 ```
 
 ### API Key Setup
@@ -62,10 +103,34 @@ OPENAI_API_KEY=your-key-here
 linux-voice
 ```
 
+If using a virtual environment:
+```bash
+~/.local/share/linux-voice/bin/python ~/.local/bin/linux-voice
+```
+
 ### Systemd Service (Auto-start)
 
+Create `~/.config/systemd/user/linux-voice.service`:
+```ini
+[Unit]
+Description=Linux Voice Dictation
+
+[Service]
+ExecStart=%h/.local/bin/linux-voice
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+If using a virtual environment, update `ExecStart`:
+```ini
+ExecStart=%h/.local/share/linux-voice/bin/python %h/.local/bin/linux-voice
+```
+
+Then enable:
 ```bash
-# Enable and start the service
+systemctl --user daemon-reload
 systemctl --user enable --now linux-voice
 
 # Check status
@@ -100,7 +165,7 @@ silence_threshold = 150  # RMS threshold for silence detection
 
 [transcription]
 language = "en"
-# prompt = "British English academic dictation. Bayesian, cosmology, nested sampling."
+# prompt = "Domain-specific vocabulary. Technical terms, jargon, names."
 ```
 
 The `prompt` helps Whisper with:
@@ -122,15 +187,34 @@ OpenAI Whisper API costs $0.006 per minute of audio. A typical 10-second dictati
 
 ### Microphone not working
 
-On modern AMD laptops (Ryzen 6000+, Strix Point), you may need:
+**Ubuntu/Debian:**
+```bash
+sudo apt install linux-firmware
+```
+
+**Fedora:**
+```bash
+sudo dnf install linux-firmware
+```
+
+**Arch Linux** (modern AMD laptops - Ryzen 6000+, Strix Point):
 ```bash
 sudo pacman -S sof-firmware
 ```
+
 Then reboot.
 
 ### Wayland
 
 xdotool has limited Wayland support. Consider using X11 or switching to ydotool.
+
+### Permission errors with pynput
+
+On some systems, you may need to run as root or add your user to the `input` group:
+```bash
+sudo usermod -aG input $USER
+```
+Then log out and back in.
 
 ## License
 
