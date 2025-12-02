@@ -67,6 +67,29 @@ if not HOTKEY_MODIFIERS:
 # For "all modifiers" check, we need one key per modifier type
 _required_modifier_types = set(_modifier_names) if _modifier_names else {"ctrl"}
 
+# Submit hotkey (Ctrl+Shift+Space by default) - same as main hotkey but presses Enter after
+_submit_cfg = CONFIG.get("hotkey_submit", {})
+SUBMIT_DELAY = _submit_cfg.get("delay", 150)  # ms delay before Enter key
+SUBMIT_KEY = getattr(
+    keyboard.Key,
+    _submit_cfg.get("key", "space"),
+    keyboard.KeyCode.from_char(_submit_cfg.get("key", "space")),
+)
+_submit_modifier_names = _submit_cfg.get("modifiers", ["ctrl", "shift"])
+SUBMIT_MODIFIERS = set()
+for mod in _submit_modifier_names:
+    if mod == "ctrl":
+        SUBMIT_MODIFIERS.update({keyboard.Key.ctrl_l, keyboard.Key.ctrl_r})
+    elif mod == "alt":
+        SUBMIT_MODIFIERS.update({keyboard.Key.alt_l, keyboard.Key.alt_r})
+    elif mod == "shift":
+        SUBMIT_MODIFIERS.update({keyboard.Key.shift_l, keyboard.Key.shift_r})
+    elif mod == "super":
+        SUBMIT_MODIFIERS.update({keyboard.Key.cmd_l, keyboard.Key.cmd_r})
+if not SUBMIT_MODIFIERS:
+    SUBMIT_MODIFIERS = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r, keyboard.Key.shift_l, keyboard.Key.shift_r}
+_submit_modifier_types = set(_submit_modifier_names) if _submit_modifier_names else {"ctrl", "shift"}
+
 
 def check_environment():
     """Check for required dependencies and environment."""
@@ -131,6 +154,7 @@ class VoiceRecorder:
         self.hotkey_pressed = False
         self.has_ffmpeg = shutil.which("ffmpeg") is not None
         self.last_transcript = ""  # Context for next transcription
+        self.submit_mode = False  # Whether to press Enter after typing
 
     def _convert_to_mp3(self, audio: np.ndarray) -> io.BytesIO:
         """Convert numpy audio to MP3 using ffmpeg."""
@@ -156,11 +180,13 @@ class VoiceRecorder:
         mp3_buffer.name = "audio.mp3"
         return mp3_buffer
 
-    def start_recording(self):
+    def start_recording(self, submit=False):
         if self.recording:
             return
         self.audio_data = []
-        print("\033[92m● Recording...\033[0m", flush=True)
+        self.submit_mode = submit
+        indicator = "● Recording..." if not submit else "● Recording (submit)..."
+        print(f"\033[92m{indicator}\033[0m", flush=True)
 
         def callback(indata, frames, time, status):
             if status:
@@ -208,9 +234,11 @@ class VoiceRecorder:
         print("\033[93m◌ Processing...\033[0m", flush=True)
 
         # Transcribe in background to not block hotkey listener
-        threading.Thread(target=self._transcribe_and_type, args=(audio,)).start()
+        threading.Thread(
+            target=self._transcribe_and_type, args=(audio, self.submit_mode)
+        ).start()
 
-    def _transcribe_and_type(self, audio: np.ndarray):
+    def _transcribe_and_type(self, audio: np.ndarray, submit: bool = False):
         try:
             # Check for silence before sending
             rms = np.sqrt(np.mean(audio.astype(np.float32) ** 2))
@@ -267,15 +295,37 @@ class VoiceRecorder:
                 check=True,
             )
 
+            # Press Enter if submit mode
+            if submit:
+                import time
+                time.sleep(SUBMIT_DELAY / 1000)
+                subprocess.run(["xdotool", "key", "Return"], check=True)
+
         except FileNotFoundError:
             print("\033[91mError: xdotool not found. Install with: sudo pacman -S xdotool\033[0m")
         except Exception as e:
             print(f"\033[91mError: {e}\033[0m")
 
     def on_press(self, key):
-        # Track modifier keys
-        if key in HOTKEY_MODIFIERS:
+        # Track modifier keys (include both hotkey and submit modifiers)
+        all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS
+        if key in all_modifiers:
             self.pressed_modifiers.add(key)
+
+        # Check if submit hotkey is pressed (Alt+Space or configured)
+        if key == SUBMIT_KEY and _has_all_modifiers(
+            self.pressed_modifiers, _submit_modifier_types
+        ):
+            if MODE == "toggle":
+                if self.recording:
+                    self.stop_recording()
+                else:
+                    self.start_recording(submit=True)
+            else:  # hold mode
+                if not self.hotkey_pressed:
+                    self.hotkey_pressed = True
+                    self.start_recording(submit=True)
+            return
 
         # Check if hotkey combo is pressed (all required modifiers)
         if key == HOTKEY_KEY and _has_all_modifiers(
@@ -293,17 +343,23 @@ class VoiceRecorder:
 
     def on_release(self, key):
         # Track modifier release
-        if key in HOTKEY_MODIFIERS:
+        all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS
+        if key in all_modifiers:
             self.pressed_modifiers.discard(key)
 
-        # In hold mode, stop when space is released
-        if MODE == "hold" and key == HOTKEY_KEY and self.hotkey_pressed:
+        # In hold mode, stop when space is released (works for both hotkeys)
+        if MODE == "hold" and key in (HOTKEY_KEY, SUBMIT_KEY) and self.hotkey_pressed:
             self.hotkey_pressed = False
             self.stop_recording()
 
     def run(self):
+        # Format hotkey names for display
+        hotkey_str = "+".join(m.capitalize() for m in _required_modifier_types) + "+Space"
+        submit_str = "+".join(m.capitalize() for m in _submit_modifier_types) + "+Space"
+
         print(f"linux-voice started (mode: {MODE})")
-        print(f"Press Ctrl+Space to {'toggle' if MODE == 'toggle' else 'hold and'} record")
+        print(f"  {hotkey_str}: {'toggle' if MODE == 'toggle' else 'hold to'} record")
+        print(f"  {submit_str}: record and submit (press Enter)")
         print("Press Ctrl+C to exit\n")
 
         try:

@@ -1,6 +1,6 @@
 # Maintainer: Will Handley <wh260@cantab.ac.uk>
 pkgname=linux-voice
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Voice-to-text dictation tool for Linux (X11) using OpenAI Whisper"
 arch=('any')

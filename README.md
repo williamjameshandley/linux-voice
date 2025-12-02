@@ -149,6 +149,18 @@ journalctl --user -u linux-voice -f
 LINUX_VOICE_MODE=toggle linux-voice
 ```
 
+### Submit Hotkey
+
+Use Ctrl+Shift+Space (default) to record and automatically press Enter after typing. Useful for command-line input, chat applications, or any context where you want to submit immediately.
+
+Configure an alternative (e.g., Alt+Space) in `~/.config/linux-voice/config.toml`:
+```toml
+[hotkey_submit]
+key = "space"
+modifiers = ["alt"]
+delay = 150  # ms delay before Enter (increase if unreliable)
+```
+
 ## Configuration
 
 Create `~/.config/linux-voice/config.toml` to customize:
@@ -158,6 +170,11 @@ Create `~/.config/linux-voice/config.toml` to customize:
 key = "space"
 modifiers = ["ctrl"]
 mode = "hold"  # or "toggle"
+
+[hotkey_submit]
+key = "space"
+modifiers = ["ctrl", "shift"]  # Ctrl+Shift+Space by default
+delay = 150                     # ms delay before Enter key
 
 [audio]
 sample_rate = 16000      # Whisper native rate (don't change unless needed)
