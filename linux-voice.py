@@ -19,7 +19,6 @@ from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-from openai import OpenAI
 from pynput import keyboard
 
 # Minimum recording duration in seconds (avoid accidental triggers)
@@ -41,6 +40,13 @@ SAMPLE_RATE = CONFIG.get("audio", {}).get("sample_rate", 16000)  # Whisper nativ
 CHANNELS = 1
 LANGUAGE = CONFIG.get("transcription", {}).get("language", "en")
 PROMPT = CONFIG.get("transcription", {}).get("prompt", "")
+REPLACEMENTS = CONFIG.get("replacements", {})
+
+# Backend configuration (openai or groq)
+BACKEND = CONFIG.get("transcription", {}).get("backend", "openai")
+WHISPER_MODEL = CONFIG.get("transcription", {}).get("model", None)
+if WHISPER_MODEL is None:
+    WHISPER_MODEL = "whisper-large-v3-turbo" if BACKEND == "groq" else "whisper-1"
 MODE = os.environ.get(
     "LINUX_VOICE_MODE",
     CONFIG.get("hotkey", {}).get("mode", "hold"),
@@ -91,13 +97,25 @@ if not SUBMIT_MODIFIERS:
 _submit_modifier_types = set(_submit_modifier_names) if _submit_modifier_names else {"ctrl", "shift"}
 
 
+def apply_replacements(text: str) -> str:
+    """Apply user-configured regex replacements."""
+    import re
+    for pattern, replacement in REPLACEMENTS.items():
+        text = re.sub(pattern, replacement, text)
+    return text
+
+
 def check_environment():
     """Check for required dependencies and environment."""
     errors = []
 
-    # Check for OPENAI_API_KEY
-    if not os.environ.get("OPENAI_API_KEY"):
-        errors.append("OPENAI_API_KEY environment variable not set")
+    # Check for API key based on backend
+    if BACKEND == "groq":
+        if not os.environ.get("GROQ_API_KEY"):
+            errors.append("GROQ_API_KEY environment variable not set")
+    else:
+        if not os.environ.get("OPENAI_API_KEY"):
+            errors.append("OPENAI_API_KEY environment variable not set")
 
     # Check for xdotool
     if not shutil.which("xdotool"):
@@ -146,14 +164,18 @@ SILENCE_THRESHOLD = CONFIG.get("audio", {}).get("silence_threshold", 150)
 
 class VoiceRecorder:
     def __init__(self):
-        self.client = OpenAI()
+        if BACKEND == "groq":
+            from groq import Groq
+            self.client = Groq()
+        else:
+            from openai import OpenAI
+            self.client = OpenAI()
         self.recording = False
         self.audio_data = []
         self.stream = None
         self.pressed_modifiers = set()
         self.hotkey_pressed = False
         self.has_ffmpeg = shutil.which("ffmpeg") is not None
-        self.last_transcript = ""  # Context for next transcription
         self.submit_mode = False  # Whether to press Enter after typing
 
     def _convert_to_mp3(self, audio: np.ndarray) -> io.BytesIO:
@@ -259,16 +281,12 @@ class VoiceRecorder:
                 file_buffer.seek(0)
                 file_buffer.name = "audio.wav"
 
-            # Build prompt with base prompt and recent context
-            context = self.last_transcript[-200:] if self.last_transcript else ""
-            full_prompt = f"{PROMPT} {context}".strip()
-
-            # Transcribe with OpenAI Whisper
+            # Transcribe
             transcript = self.client.audio.transcriptions.create(
-                model="whisper-1",
+                model=WHISPER_MODEL,
                 file=file_buffer,
                 language=LANGUAGE,
-                prompt=full_prompt,
+                prompt=PROMPT,
                 response_format="text",
                 temperature=0.0,
             )
@@ -278,10 +296,8 @@ class VoiceRecorder:
                 print("(no speech detected)")
                 return
 
-            # Update context for next transcription
-            self.last_transcript += " " + text
-            if len(self.last_transcript) > 1000:
-                self.last_transcript = self.last_transcript[-500:]
+            # Apply user-configured replacements
+            text = apply_replacements(text)
 
             print(f"\033[94m→ {text}\033[0m")
 
@@ -357,7 +373,7 @@ class VoiceRecorder:
         hotkey_str = "+".join(m.capitalize() for m in _required_modifier_types) + "+Space"
         submit_str = "+".join(m.capitalize() for m in _submit_modifier_types) + "+Space"
 
-        print(f"linux-voice started (mode: {MODE})")
+        print(f"linux-voice started (mode: {MODE}, backend: {BACKEND})")
         print(f"  {hotkey_str}: {'toggle' if MODE == 'toggle' else 'hold to'} record")
         print(f"  {submit_str}: record and submit (press Enter)")
         print("Press Ctrl+C to exit\n")

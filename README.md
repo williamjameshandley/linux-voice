@@ -181,14 +181,38 @@ sample_rate = 16000      # Whisper native rate (don't change unless needed)
 silence_threshold = 150  # RMS threshold for silence detection
 
 [transcription]
+backend = "openai"  # or "groq"
 language = "en"
+# model = "whisper-1"  # or "whisper-large-v3-turbo" for groq
 # prompt = "Domain-specific vocabulary. Technical terms, jargon, names."
 ```
+
+### Backend Options
+
+| Backend | Model | Cost | Latency |
+|---------|-------|------|---------|
+| `openai` | whisper-1 | $0.006/min | ~1-2s |
+| `groq` | whisper-large-v3-turbo | $0.04/hr | ~200ms |
+
+For Groq, set `GROQ_API_KEY` instead of `OPENAI_API_KEY`.
 
 The `prompt` helps Whisper with:
 - British vs American spelling (colour, favour, organisation)
 - Domain-specific vocabulary (your field's jargon)
 - Consistent formatting and punctuation
+
+### Text Replacements
+
+Define regex replacements to convert spoken phrases into special characters or commands:
+
+```toml
+[replacements]
+"^[Ss]lash " = "/"              # "slash compact" → "/compact"
+"^[Ff]orward [Ss]lash " = "/"
+"^(/.*)\\.\\s*$" = "\\1"        # strip period only from /commands
+```
+
+This allows saying "slash compact" to type `/compact` for Claude Code commands.
 
 ## Privacy and Security
 
