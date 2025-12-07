@@ -132,6 +132,17 @@ def apply_replacements(text: str) -> str:
     return text
 
 
+def check_connectivity(timeout: float = 2.0) -> bool:
+    """Quick check for internet connectivity to API endpoint."""
+    import socket
+    host = "api.groq.com" if BACKEND == "groq" else "api.openai.com"
+    try:
+        socket.create_connection((host, 443), timeout=timeout)
+        return True
+    except OSError:
+        return False
+
+
 def check_environment():
     """Check for required dependencies and environment."""
     errors = []
@@ -234,18 +245,29 @@ class VoiceRecorder:
 
     def _correct_with_llm(self, original: str, instruction: str) -> str:
         """Use LLM to correct text based on instruction."""
-        system_prompt = """You are an intelligent text editing assistant for a voice dictation tool. Your goal is to apply user correction instructions to the provided text.
+        system_prompt = """You are an intelligent text editing assistant for a voice dictation tool used by a programmer in a Unix terminal environment. Your goal is to apply user correction instructions to the provided text.
+
+Context about the user:
+- Working in Unix/Linux terminal, often typing shell commands and code
+- Programming languages: Python, shell scripts, and related tools
+- Voice recognition often mishears technical terms (e.g., "cash" for "cache", "bite" for "byte", "get" for "git", "pie" for "py", "boss" for "bash")
 
 Follow these rules:
 1. GLOBAL APPLICATION: Apply the instruction to the ENTIRE text. Do not stop after the first few instances. Scan from start to finish.
 2. BROAD INTENT: Interpret instructions generously. If the user asks to change "numbers", apply it to digits, written words, and mixed formats. If they ask to "remove filler words", remove all types.
 3. CONSISTENCY: Ensure the corrected text is stylistically consistent. If a change is applied to one part, apply it to matching patterns elsewhere.
 4. INTEGRITY: Do not change the meaning of the content, only the form/style as requested.
-5. STRICT OUTPUT: Output ONLY the corrected text. No preamble, no explanation, no quotes."""
+5. TECHNICAL AWARENESS: Consider programming/Unix context when interpreting corrections.
+6. STRICT OUTPUT: Output ONLY the corrected text. No preamble, no explanation, no quotes."""
+
+        # Include domain context from Whisper prompt if available
+        context_note = ""
+        if PROMPT:
+            context_note = f"\n\nDomain context: {PROMPT}"
 
         user_prompt = f"""Original text: {original}
 
-Instruction: {instruction}"""
+Instruction: {instruction}{context_note}"""
 
         try:
             response = self.client.chat.completions.create(
@@ -347,6 +369,30 @@ Instruction: {instruction}"""
                 print("(silence detected, skipping)")
                 return
 
+            # Check internet connectivity
+            if not check_connectivity():
+                print("\033[91mNo internet connection\033[0m")
+                # Save audio to temp file for potential recovery (don't overwrite existing)
+                recovery_path = Path("/tmp/linux-voice-recovery.wav")
+                if recovery_path.exists():
+                    # Don't overwrite - just remind user to recover first
+                    subprocess.run(
+                        ["xdotool", "type", "--delay", "0", "--", "(no internet - say 'recover' first)"],
+                        check=False,
+                    )
+                else:
+                    with wave.open(str(recovery_path), "wb") as wf:
+                        wf.setnchannels(CHANNELS)
+                        wf.setsampwidth(2)
+                        wf.setframerate(SAMPLE_RATE)
+                        wf.writeframes(audio.tobytes())
+                    print(f"Audio saved to {recovery_path}")
+                    subprocess.run(
+                        ["xdotool", "type", "--delay", "0", "--", "(no internet - say 'recover' to retry)"],
+                        check=False,
+                    )
+                return
+
             # Convert to MP3 if ffmpeg available, otherwise WAV
             if self.has_ffmpeg:
                 file_buffer = self._convert_to_mp3(audio)
@@ -373,6 +419,12 @@ Instruction: {instruction}"""
             text = transcript.strip()
             if not text:
                 print("(no speech detected)")
+                return
+
+            # Check for voice commands
+            if text.lower() in ("recover", "recover.", "recovery", "recovery."):
+                print("Voice command: recover")
+                self.recover_audio()
                 return
 
             # Release any stuck modifiers before typing
@@ -429,6 +481,34 @@ Instruction: {instruction}"""
             print("\033[91mError: xdotool not found. Install with: sudo pacman -S xdotool\033[0m")
         except Exception as e:
             print(f"\033[91mError: {e}\033[0m")
+
+    def recover_audio(self):
+        """Recover and transcribe audio from a failed attempt."""
+        recovery_path = Path("/tmp/linux-voice-recovery.wav")
+        if not recovery_path.exists():
+            print("No recovery file found")
+            subprocess.run(
+                ["xdotool", "type", "--delay", "0", "--", "(no recovery file)"],
+                check=False,
+            )
+            return
+
+        # Load audio from recovery file
+        with wave.open(str(recovery_path), "rb") as wf:
+            audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+
+        print(f"Recovering audio from {recovery_path}...")
+
+        # Clear the "no internet" message first
+        subprocess.run(["xdotool", "key", "ctrl+u"], check=False)
+
+        # Transcribe in background
+        threading.Thread(
+            target=self._transcribe_and_type, args=(audio, False, False)
+        ).start()
+
+        # Remove recovery file
+        recovery_path.unlink()
 
     def on_press(self, key):
         # Track modifier keys (include all hotkey modifiers)
@@ -515,7 +595,33 @@ Instruction: {instruction}"""
             sys.exit(1)
 
 
+def recover():
+    """Transcribe the recovery audio file from a failed attempt."""
+    recovery_path = Path("/tmp/linux-voice-recovery.wav")
+    if not recovery_path.exists():
+        print("No recovery file found")
+        return
+
+    check_environment()
+
+    # Load audio from recovery file
+    with wave.open(str(recovery_path), "rb") as wf:
+        audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+
+    print(f"Recovering audio from {recovery_path}...")
+    recorder = VoiceRecorder()
+    recorder._transcribe_and_type(audio, submit=False, edit=False)
+
+    # Remove recovery file after successful transcription
+    recovery_path.unlink()
+    print("Recovery file removed")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--recover":
+        recover()
+        return
+
     check_environment()
     recorder = VoiceRecorder()
     try:
