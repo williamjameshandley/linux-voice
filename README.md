@@ -167,9 +167,9 @@ Use Ctrl+Alt+Space (default) to correct the previous transcription using an LLM.
 
 1. Dictate normally with Ctrl+Space → "The function uses a cash mechanism"
 2. Hold Ctrl+Alt+Space and say "change cash to cache"
-3. The original text is backspaced and replaced with "The function uses a cache mechanism"
+3. The original text is cleared and replaced with "The function uses a cache mechanism"
 
-The edit uses the backend's chat model (gpt-4o-mini for OpenAI, llama-3.3-70b-versatile for Groq).
+The edit uses the backend's chat model (gpt-4o-mini for OpenAI, llama-3.3-70b-versatile for Groq). The LLM is aware of Unix/programming context and common voice recognition errors (cash→cache, bite→byte, get→git, etc.).
 
 Configure in `~/.config/linux-voice/config.toml`:
 ```toml
@@ -180,6 +180,22 @@ modifiers = ["ctrl", "alt"]
 [transcription]
 # llm_model = "gpt-4o-mini"  # Override LLM model for corrections
 ```
+
+### Offline Recovery
+
+If the internet connection fails during transcription, the audio is saved and you'll see:
+
+```
+(no internet - say 'recover' to retry)
+```
+
+When internet is restored, hold Ctrl+Space and say "recover" to transcribe the saved audio. The recovery file is stored at `/tmp/linux-voice-recovery.wav` and deleted after successful recovery.
+
+### Voice Commands
+
+| Command | Action |
+|---------|--------|
+| "recover" | Transcribe saved audio from a failed attempt |
 
 ## Configuration
 
