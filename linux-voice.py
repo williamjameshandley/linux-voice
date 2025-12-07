@@ -96,6 +96,33 @@ if not SUBMIT_MODIFIERS:
     SUBMIT_MODIFIERS = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r, keyboard.Key.shift_l, keyboard.Key.shift_r}
 _submit_modifier_types = set(_submit_modifier_names) if _submit_modifier_names else {"ctrl", "shift"}
 
+# Edit hotkey (Ctrl+Alt+Space by default) - corrects last transcription via LLM
+_edit_cfg = CONFIG.get("hotkey_edit", {})
+EDIT_KEY = getattr(
+    keyboard.Key,
+    _edit_cfg.get("key", "space"),
+    keyboard.KeyCode.from_char(_edit_cfg.get("key", "space")),
+)
+_edit_modifier_names = _edit_cfg.get("modifiers", ["ctrl", "alt"])
+EDIT_MODIFIERS = set()
+for mod in _edit_modifier_names:
+    if mod == "ctrl":
+        EDIT_MODIFIERS.update({keyboard.Key.ctrl_l, keyboard.Key.ctrl_r})
+    elif mod == "alt":
+        EDIT_MODIFIERS.update({keyboard.Key.alt_l, keyboard.Key.alt_r})
+    elif mod == "shift":
+        EDIT_MODIFIERS.update({keyboard.Key.shift_l, keyboard.Key.shift_r})
+    elif mod == "super":
+        EDIT_MODIFIERS.update({keyboard.Key.cmd_l, keyboard.Key.cmd_r})
+if not EDIT_MODIFIERS:
+    EDIT_MODIFIERS = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r, keyboard.Key.alt_l, keyboard.Key.alt_r}
+_edit_modifier_types = set(_edit_modifier_names) if _edit_modifier_names else {"ctrl", "alt"}
+
+# LLM model for corrections (per backend)
+LLM_MODEL = CONFIG.get("transcription", {}).get("llm_model", None)
+if LLM_MODEL is None:
+    LLM_MODEL = "llama-3.3-70b-versatile" if BACKEND == "groq" else "gpt-4o-mini"
+
 
 def apply_replacements(text: str) -> str:
     """Apply user-configured regex replacements."""
@@ -177,6 +204,9 @@ class VoiceRecorder:
         self.hotkey_pressed = False
         self.has_ffmpeg = shutil.which("ffmpeg") is not None
         self.submit_mode = False  # Whether to press Enter after typing
+        self.edit_mode = False  # Whether to correct last transcription
+        self.last_typed_text = ""  # Store for edit mode corrections
+        self.active_window_id = None  # Window to type into
 
     def _convert_to_mp3(self, audio: np.ndarray) -> io.BytesIO:
         """Convert numpy audio to MP3 using ffmpeg."""
@@ -202,12 +232,61 @@ class VoiceRecorder:
         mp3_buffer.name = "audio.mp3"
         return mp3_buffer
 
-    def start_recording(self, submit=False):
+    def _correct_with_llm(self, original: str, instruction: str) -> str:
+        """Use LLM to correct text based on instruction."""
+        system_prompt = """You are an intelligent text editing assistant for a voice dictation tool. Your goal is to apply user correction instructions to the provided text.
+
+Follow these rules:
+1. GLOBAL APPLICATION: Apply the instruction to the ENTIRE text. Do not stop after the first few instances. Scan from start to finish.
+2. BROAD INTENT: Interpret instructions generously. If the user asks to change "numbers", apply it to digits, written words, and mixed formats. If they ask to "remove filler words", remove all types.
+3. CONSISTENCY: Ensure the corrected text is stylistically consistent. If a change is applied to one part, apply it to matching patterns elsewhere.
+4. INTEGRITY: Do not change the meaning of the content, only the form/style as requested.
+5. STRICT OUTPUT: Output ONLY the corrected text. No preamble, no explanation, no quotes."""
+
+        user_prompt = f"""Original text: {original}
+
+Instruction: {instruction}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.0,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"\033[91mLLM error: {e}\033[0m")
+            return original  # Return original on error
+
+    def start_recording(self, submit=False, edit=False):
         if self.recording:
+            return
+        if edit and not self.last_typed_text:
+            print("\033[91mNo previous text to edit\033[0m", flush=True)
             return
         self.audio_data = []
         self.submit_mode = submit
-        indicator = "● Recording..." if not submit else "● Recording (submit)..."
+        self.edit_mode = edit
+        # Capture active window for later focus restoration
+        try:
+            result = subprocess.run(
+                ["xdotool", "getactivewindow"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.active_window_id = result.stdout.strip()
+        except Exception:
+            self.active_window_id = None
+        if edit:
+            indicator = "● Recording edit instruction..."
+        elif submit:
+            indicator = "● Recording (submit)..."
+        else:
+            indicator = "● Recording..."
         print(f"\033[92m{indicator}\033[0m", flush=True)
 
         def callback(indata, frames, time, status):
@@ -257,10 +336,10 @@ class VoiceRecorder:
 
         # Transcribe in background to not block hotkey listener
         threading.Thread(
-            target=self._transcribe_and_type, args=(audio, self.submit_mode)
+            target=self._transcribe_and_type, args=(audio, self.submit_mode, self.edit_mode)
         ).start()
 
-    def _transcribe_and_type(self, audio: np.ndarray, submit: bool = False):
+    def _transcribe_and_type(self, audio: np.ndarray, submit: bool = False, edit: bool = False):
         try:
             # Check for silence before sending
             rms = np.sqrt(np.mean(audio.astype(np.float32) ** 2))
@@ -296,26 +375,55 @@ class VoiceRecorder:
                 print("(no speech detected)")
                 return
 
-            # Apply user-configured replacements
-            text = apply_replacements(text)
-
-            print(f"\033[94m→ {text}\033[0m")
-
             # Release any stuck modifiers before typing
             subprocess.run(
                 ["xdotool", "keyup", "ctrl", "shift", "alt", "super"],
                 check=False,
             )
-            subprocess.run(
-                ["xdotool", "type", "--delay", "0", "--", text],
-                check=True,
-            )
 
-            # Press Enter if submit mode
-            if submit:
-                import time
-                time.sleep(SUBMIT_DELAY / 1000)
-                subprocess.run(["xdotool", "key", "Return"], check=True)
+            # Restore focus to the original window (may have changed during API call)
+            if self.active_window_id:
+                subprocess.run(
+                    ["xdotool", "windowactivate", "--sync", self.active_window_id],
+                    check=False,
+                )
+
+            if edit:
+                # Edit mode: use transcription as instruction to correct previous text
+                instruction = text
+                print(f"\033[93m◌ Correcting: {instruction}\033[0m", flush=True)
+
+                corrected = self._correct_with_llm(self.last_typed_text, instruction)
+                print(f"\033[94m→ {corrected}\033[0m")
+
+                # Clear the line with Ctrl+U (works in terminals and many input fields)
+                subprocess.run(
+                    ["xdotool", "key", "ctrl+u"],
+                    check=False,
+                )
+
+                # Type corrected text
+                subprocess.run(
+                    ["xdotool", "type", "--delay", "0", "--", corrected],
+                    check=True,
+                )
+                self.last_typed_text = corrected
+            else:
+                # Normal mode: apply replacements and type
+                text = apply_replacements(text)
+                print(f"\033[94m→ {text}\033[0m")
+
+                subprocess.run(
+                    ["xdotool", "type", "--delay", "0", "--", text],
+                    check=True,
+                )
+                self.last_typed_text = text
+
+                # Press Enter if submit mode
+                if submit:
+                    import time
+                    time.sleep(SUBMIT_DELAY / 1000)
+                    subprocess.run(["xdotool", "key", "Return"], check=True)
 
         except FileNotFoundError:
             print("\033[91mError: xdotool not found. Install with: sudo pacman -S xdotool\033[0m")
@@ -323,12 +431,27 @@ class VoiceRecorder:
             print(f"\033[91mError: {e}\033[0m")
 
     def on_press(self, key):
-        # Track modifier keys (include both hotkey and submit modifiers)
-        all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS
+        # Track modifier keys (include all hotkey modifiers)
+        all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS | EDIT_MODIFIERS
         if key in all_modifiers:
             self.pressed_modifiers.add(key)
 
-        # Check if submit hotkey is pressed (Alt+Space or configured)
+        # Check if edit hotkey is pressed (Ctrl+Alt+Space or configured)
+        if key == EDIT_KEY and _has_all_modifiers(
+            self.pressed_modifiers, _edit_modifier_types
+        ):
+            if MODE == "toggle":
+                if self.recording:
+                    self.stop_recording()
+                else:
+                    self.start_recording(edit=True)
+            else:  # hold mode
+                if not self.hotkey_pressed:
+                    self.hotkey_pressed = True
+                    self.start_recording(edit=True)
+            return
+
+        # Check if submit hotkey is pressed (Ctrl+Shift+Space or configured)
         if key == SUBMIT_KEY and _has_all_modifiers(
             self.pressed_modifiers, _submit_modifier_types
         ):
@@ -359,12 +482,12 @@ class VoiceRecorder:
 
     def on_release(self, key):
         # Track modifier release
-        all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS
+        all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS | EDIT_MODIFIERS
         if key in all_modifiers:
             self.pressed_modifiers.discard(key)
 
-        # In hold mode, stop when space is released (works for both hotkeys)
-        if MODE == "hold" and key in (HOTKEY_KEY, SUBMIT_KEY) and self.hotkey_pressed:
+        # In hold mode, stop when space is released (works for all hotkeys)
+        if MODE == "hold" and key in (HOTKEY_KEY, SUBMIT_KEY, EDIT_KEY) and self.hotkey_pressed:
             self.hotkey_pressed = False
             self.stop_recording()
 
@@ -372,10 +495,12 @@ class VoiceRecorder:
         # Format hotkey names for display
         hotkey_str = "+".join(m.capitalize() for m in _required_modifier_types) + "+Space"
         submit_str = "+".join(m.capitalize() for m in _submit_modifier_types) + "+Space"
+        edit_str = "+".join(m.capitalize() for m in _edit_modifier_types) + "+Space"
 
         print(f"linux-voice started (mode: {MODE}, backend: {BACKEND})")
         print(f"  {hotkey_str}: {'toggle' if MODE == 'toggle' else 'hold to'} record")
         print(f"  {submit_str}: record and submit (press Enter)")
+        print(f"  {edit_str}: record correction instruction")
         print("Press Ctrl+C to exit\n")
 
         try:

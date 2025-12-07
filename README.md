@@ -161,6 +161,26 @@ modifiers = ["alt"]
 delay = 150  # ms delay before Enter (increase if unreliable)
 ```
 
+### Edit Hotkey
+
+Use Ctrl+Alt+Space (default) to correct the previous transcription using an LLM. This is useful when Whisper misinterprets a word:
+
+1. Dictate normally with Ctrl+Space → "The function uses a cash mechanism"
+2. Hold Ctrl+Alt+Space and say "change cash to cache"
+3. The original text is backspaced and replaced with "The function uses a cache mechanism"
+
+The edit uses the backend's chat model (gpt-4o-mini for OpenAI, llama-3.3-70b-versatile for Groq).
+
+Configure in `~/.config/linux-voice/config.toml`:
+```toml
+[hotkey_edit]
+key = "space"
+modifiers = ["ctrl", "alt"]
+
+[transcription]
+# llm_model = "gpt-4o-mini"  # Override LLM model for corrections
+```
+
 ## Configuration
 
 Create `~/.config/linux-voice/config.toml` to customize:
@@ -176,6 +196,10 @@ key = "space"
 modifiers = ["ctrl", "shift"]  # Ctrl+Shift+Space by default
 delay = 150                     # ms delay before Enter key
 
+[hotkey_edit]
+key = "space"
+modifiers = ["ctrl", "alt"]    # Ctrl+Alt+Space by default
+
 [audio]
 sample_rate = 16000      # Whisper native rate (don't change unless needed)
 silence_threshold = 150  # RMS threshold for silence detection
@@ -184,6 +208,7 @@ silence_threshold = 150  # RMS threshold for silence detection
 backend = "openai"  # or "groq"
 language = "en"
 # model = "whisper-1"  # or "whisper-large-v3-turbo" for groq
+# llm_model = "gpt-4o-mini"  # or "llama-3.3-70b-versatile" for groq (edit mode)
 # prompt = "Domain-specific vocabulary. Technical terms, jargon, names."
 ```
 
