@@ -47,6 +47,7 @@ BACKEND = CONFIG.get("transcription", {}).get("backend", "openai")
 WHISPER_MODEL = CONFIG.get("transcription", {}).get("model", None)
 if WHISPER_MODEL is None:
     WHISPER_MODEL = "whisper-large-v3-turbo" if BACKEND == "groq" else "whisper-1"
+API_TIMEOUT = CONFIG.get("transcription", {}).get("timeout", 5.0)
 MODE = os.environ.get(
     "LINUX_VOICE_MODE",
     CONFIG.get("hotkey", {}).get("mode", "hold"),
@@ -202,12 +203,6 @@ SILENCE_THRESHOLD = CONFIG.get("audio", {}).get("silence_threshold", 150)
 
 class VoiceRecorder:
     def __init__(self):
-        if BACKEND == "groq":
-            from groq import Groq
-            self.client = Groq()
-        else:
-            from openai import OpenAI
-            self.client = OpenAI()
         self.recording = False
         self.audio_data = []
         self.stream = None
@@ -270,7 +265,14 @@ Follow these rules:
 Instruction: {instruction}{context_note}"""
 
         try:
-            response = self.client.chat.completions.create(
+            # Create fresh client (avoids thread-safety issues)
+            if BACKEND == "groq":
+                from groq import Groq
+                client = Groq()
+            else:
+                from openai import OpenAI
+                client = OpenAI()
+            response = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -406,15 +408,45 @@ Instruction: {instruction}{context_note}"""
                 file_buffer.seek(0)
                 file_buffer.name = "audio.wav"
 
-            # Transcribe
-            transcript = self.client.audio.transcriptions.create(
-                model=WHISPER_MODEL,
-                file=file_buffer,
-                language=LANGUAGE,
-                prompt=PROMPT,
-                response_format="text",
-                temperature=0.0,
-            )
+            # Create a fresh client for this request (avoids thread-safety issues with shared client)
+            if BACKEND == "groq":
+                from groq import Groq
+                client = Groq()
+            else:
+                from openai import OpenAI
+                client = OpenAI()
+
+            # Transcribe with timeout
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(
+                    client.audio.transcriptions.create,
+                    model=WHISPER_MODEL,
+                    file=file_buffer,
+                    language=LANGUAGE,
+                    prompt=PROMPT,
+                    response_format="text",
+                    temperature=0.0,
+                )
+                transcript = future.result(timeout=API_TIMEOUT)
+            except FuturesTimeoutError:
+                executor.shutdown(wait=False)
+                print(f"\033[91mAPI timeout after {API_TIMEOUT}s\033[0m")
+                recovery_path = Path("/tmp/linux-voice-recovery.wav")
+                with wave.open(str(recovery_path), "wb") as wf:
+                    wf.setnchannels(CHANNELS)
+                    wf.setsampwidth(2)
+                    wf.setframerate(SAMPLE_RATE)
+                    wf.writeframes(audio.tobytes())
+                print(f"Audio saved to {recovery_path}")
+                subprocess.run(
+                    ["xdotool", "type", "--delay", "0", "--", "(timeout - say 'recover' to retry)"],
+                    check=False,
+                )
+                return
+            finally:
+                executor.shutdown(wait=False)
 
             text = transcript.strip()
             if not text:
