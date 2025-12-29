@@ -47,7 +47,6 @@ BACKEND = CONFIG.get("transcription", {}).get("backend", "openai")
 WHISPER_MODEL = CONFIG.get("transcription", {}).get("model", None)
 if WHISPER_MODEL is None:
     WHISPER_MODEL = "whisper-large-v3-turbo" if BACKEND == "groq" else "whisper-1"
-API_TIMEOUT = CONFIG.get("transcription", {}).get("timeout", 5.0)
 MODE = os.environ.get(
     "LINUX_VOICE_MODE",
     CONFIG.get("hotkey", {}).get("mode", "hold"),
@@ -203,6 +202,12 @@ SILENCE_THRESHOLD = CONFIG.get("audio", {}).get("silence_threshold", 150)
 
 class VoiceRecorder:
     def __init__(self):
+        if BACKEND == "groq":
+            from groq import Groq
+            self.client = Groq()
+        else:
+            from openai import OpenAI
+            self.client = OpenAI()
         self.recording = False
         self.audio_data = []
         self.stream = None
@@ -265,14 +270,7 @@ Follow these rules:
 Instruction: {instruction}{context_note}"""
 
         try:
-            # Create fresh client (avoids thread-safety issues)
-            if BACKEND == "groq":
-                from groq import Groq
-                client = Groq()
-            else:
-                from openai import OpenAI
-                client = OpenAI()
-            response = client.chat.completions.create(
+            response = self.client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -318,10 +316,6 @@ Instruction: {instruction}{context_note}"""
                 print(f"Audio status: {status}", flush=True)
             if self.recording:
                 self.audio_data.append(indata.copy())
-                # Log first chunk to verify audio is being captured
-                if len(self.audio_data) == 1:
-                    rms = np.sqrt(np.mean(indata.astype(np.float32) ** 2))
-                    print(f"(first audio chunk: rms={rms:.0f})", flush=True)
 
         try:
             self.stream = sd.InputStream(
@@ -339,29 +333,20 @@ Instruction: {instruction}{context_note}"""
             print(f"\033[91mAudio error: {e}\033[0m", flush=True)
 
     def stop_recording(self):
-        import time as _time
         if not self.recording:
             return
-        print(f"(STOP: begin)", flush=True)
         self.recording = False
         if self.stream:
-            print(f"(STOP: stopping stream...)", flush=True)
             self.stream.stop()
-            print(f"(STOP: closing stream...)", flush=True)
             self.stream.close()
-            print(f"(STOP: stream closed)", flush=True)
             self.stream = None
-            # Small delay to let PortAudio fully release the device
-            _time.sleep(0.05)
 
         if not self.audio_data:
             print("No audio recorded")
             return
 
         # Combine audio chunks
-        print(f"(STOP: concatenating...)", flush=True)
         audio = np.concatenate(self.audio_data, axis=0)
-        print(f"(STOP: concatenated)", flush=True)
 
         # Check minimum duration
         duration = len(audio) / SAMPLE_RATE
@@ -372,33 +357,20 @@ Instruction: {instruction}{context_note}"""
         print("\033[93m◌ Processing...\033[0m", flush=True)
 
         # Transcribe in background to not block hotkey listener
-        print(f"(STOP: starting thread...)", flush=True)
         threading.Thread(
             target=self._transcribe_and_type, args=(audio, self.submit_mode, self.edit_mode)
         ).start()
-        print(f"(STOP: thread started)", flush=True)
 
     def _transcribe_and_type(self, audio: np.ndarray, submit: bool = False, edit: bool = False):
-        import time as _time
-        print(f"(thread started, audio shape={audio.shape})", flush=True)
         try:
             # Check for silence before sending
-            _t = _time.time()
             rms = np.sqrt(np.mean(audio.astype(np.float32) ** 2))
-            print(f"(silence check: rms={rms:.0f}, threshold={SILENCE_THRESHOLD}, took {_time.time()-_t:.3f}s)", flush=True)
-            _is_silence = rms < SILENCE_THRESHOLD
-            print(f"(is_silence={_is_silence})", flush=True)
-            if _is_silence:
-                print("(silence detected, skipping)", flush=True)
+            if rms < SILENCE_THRESHOLD:
+                print("(silence detected, skipping)")
                 return
-            print("(not silence, continuing...)", flush=True)
 
             # Check internet connectivity
-            _t0 = _time.time()
-            print("(checking connectivity...)", flush=True)
-            _connected = check_connectivity()
-            print(f"(connectivity check took {_time.time() - _t0:.2f}s)", flush=True)
-            if not _connected:
+            if not check_connectivity():
                 print("\033[91mNo internet connection\033[0m")
                 # Save audio to temp file for potential recovery (don't overwrite existing)
                 recovery_path = Path("/tmp/linux-voice-recovery.wav")
@@ -422,8 +394,6 @@ Instruction: {instruction}{context_note}"""
                 return
 
             # Convert to MP3 if ffmpeg available, otherwise WAV
-            print("(converting audio...)", flush=True)
-            _t1 = _time.time()
             if self.has_ffmpeg:
                 file_buffer = self._convert_to_mp3(audio)
             else:
@@ -435,53 +405,16 @@ Instruction: {instruction}{context_note}"""
                     wf.writeframes(audio.tobytes())
                 file_buffer.seek(0)
                 file_buffer.name = "audio.wav"
-            print(f"(audio converted in {_time.time() - _t1:.2f}s)", flush=True)
 
-            # Create a fresh client for this request (avoids thread-safety issues with shared client)
-            _t0 = _time.time()
-            if BACKEND == "groq":
-                from groq import Groq
-                client = Groq()
-            else:
-                from openai import OpenAI
-                client = OpenAI()
-            print(f"(client created in {_time.time() - _t0:.2f}s)", flush=True)
-
-            # Transcribe with timeout
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-            executor = ThreadPoolExecutor(max_workers=1)
-            try:
-                _start = _time.time()
-                print(f"(submitting API call, timeout={API_TIMEOUT}s)", flush=True)
-                future = executor.submit(
-                    client.audio.transcriptions.create,
-                    model=WHISPER_MODEL,
-                    file=file_buffer,
-                    language=LANGUAGE,
-                    prompt=PROMPT,
-                    response_format="text",
-                    temperature=0.0,
-                )
-                print(f"(waiting for result...)", flush=True)
-                transcript = future.result(timeout=API_TIMEOUT)
-                print(f"(API completed in {_time.time() - _start:.1f}s)", flush=True)
-            except FuturesTimeoutError:
-                executor.shutdown(wait=False)
-                print(f"\033[91mAPI timeout after {API_TIMEOUT}s\033[0m")
-                recovery_path = Path("/tmp/linux-voice-recovery.wav")
-                with wave.open(str(recovery_path), "wb") as wf:
-                    wf.setnchannels(CHANNELS)
-                    wf.setsampwidth(2)
-                    wf.setframerate(SAMPLE_RATE)
-                    wf.writeframes(audio.tobytes())
-                print(f"Audio saved to {recovery_path}")
-                subprocess.run(
-                    ["xdotool", "type", "--delay", "0", "--", "(timeout - say 'recover' to retry)"],
-                    check=False,
-                )
-                return
-            finally:
-                executor.shutdown(wait=False)
+            # Transcribe
+            transcript = self.client.audio.transcriptions.create(
+                model=WHISPER_MODEL,
+                file=file_buffer,
+                language=LANGUAGE,
+                prompt=PROMPT,
+                response_format="text",
+                temperature=0.0,
+            )
 
             text = transcript.strip()
             if not text:
