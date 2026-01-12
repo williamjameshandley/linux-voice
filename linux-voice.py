@@ -196,10 +196,6 @@ def _has_all_modifiers(pressed: set, required_types: set) -> bool:
     return True
 
 
-# Silence detection threshold (RMS value for 16-bit audio)
-SILENCE_THRESHOLD = CONFIG.get("audio", {}).get("silence_threshold", 150)
-
-
 class VoiceRecorder:
     def __init__(self):
         if BACKEND == "groq":
@@ -362,13 +358,9 @@ Instruction: {instruction}{context_note}"""
         ).start()
 
     def _transcribe_and_type(self, audio: np.ndarray, submit: bool = False, edit: bool = False):
+        import time
+        t0 = time.time()
         try:
-            # Check for silence before sending
-            rms = np.sqrt(np.mean(audio.astype(np.float32) ** 2))
-            if rms < SILENCE_THRESHOLD:
-                print("(silence detected, skipping)")
-                return
-
             # Check internet connectivity
             if not check_connectivity():
                 print("\033[91mNo internet connection\033[0m")
@@ -415,6 +407,7 @@ Instruction: {instruction}{context_note}"""
                 response_format="text",
                 temperature=0.0,
             )
+            t1 = time.time()
 
             text = transcript.strip()
             if not text:
@@ -446,7 +439,7 @@ Instruction: {instruction}{context_note}"""
                 print(f"\033[93m◌ Correcting: {instruction}\033[0m", flush=True)
 
                 corrected = self._correct_with_llm(self.last_typed_text, instruction)
-                print(f"\033[94m→ {corrected}\033[0m")
+                print(f"\033[94m→ {corrected}\033[0m ({time.time()-t0:.1f}s)", flush=True)
 
                 # Clear the line with Ctrl+U (works in terminals and many input fields)
                 subprocess.run(
@@ -463,7 +456,7 @@ Instruction: {instruction}{context_note}"""
             else:
                 # Normal mode: apply replacements and type
                 text = apply_replacements(text)
-                print(f"\033[94m→ {text}\033[0m")
+                print(f"\033[94m→ {text}\033[0m ({t1-t0:.1f}s)", flush=True)
 
                 subprocess.run(
                     ["xdotool", "type", "--delay", "0", "--", text],
