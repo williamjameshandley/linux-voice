@@ -7,10 +7,10 @@ Hold Ctrl+Space to record speech, release to transcribe and type into the focuse
 ## Requirements
 
 - Python 3.11+
-- Linux with X11 (Wayland has limited support)
+- Linux with X11 or Wayland
 - PulseAudio/PipeWire
 - Working microphone
-- OpenAI API key
+- API key (OpenAI, Groq, or Mistral)
 
 ## Installation
 
@@ -36,7 +36,10 @@ chmod +x ~/.local/bin/linux-voice
 
 ```bash
 # System dependencies
-sudo dnf install xdotool ffmpeg python3-pip
+sudo dnf install xdotool ffmpeg python3-pip python3-devel
+
+# For Wayland clipboard and auto-paste support
+sudo dnf install wl-clipboard ydotool
 
 # Create virtual environment (recommended)
 python3 -m venv ~/.local/share/linux-voice
@@ -87,7 +90,14 @@ chmod +x ~/.local/bin/linux-voice
 
 Add to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
 ```bash
+# For OpenAI
 export OPENAI_API_KEY="your-key-here"
+
+# For Groq
+export GROQ_API_KEY="your-key-here"
+
+# For Mistral
+export MISTRAL_API_KEY="your-key-here"
 ```
 
 For the systemd service, create `~/.config/environment.d/openai.conf`:
@@ -221,11 +231,20 @@ sample_rate = 16000      # Whisper native rate (don't change unless needed)
 silence_threshold = 150  # RMS threshold for silence detection
 
 [transcription]
-backend = "openai"  # or "groq"
+backend = "openai"  # or "groq" or "mistral"
 language = "en"
-# model = "whisper-1"  # or "whisper-large-v3-turbo" for groq
+# model = "whisper-1"  # or "whisper-large-v3-turbo" for groq, "voxtral-mini-latest" for mistral
 # llm_model = "gpt-4o-mini"  # or "llama-3.3-70b-versatile" for groq (edit mode)
 # prompt = "Domain-specific vocabulary. Technical terms, jargon, names."
+
+[mouse]
+# Trigger recording with a mouse button instead of keyboard
+# button = "button8"  # back thumb button
+# button = "button9"  # forward thumb button
+
+[output]
+mode = "type"        # "type" (xdotool) or "clipboard" (wl-copy/xclip)
+auto_paste = false   # Automatically paste after copying (Wayland: ydotool, X11: xdotool)
 ```
 
 ### Backend Options
@@ -234,8 +253,12 @@ language = "en"
 |---------|-------|------|---------|
 | `openai` | whisper-1 | $0.006/min | ~1-2s |
 | `groq` | whisper-large-v3-turbo | $0.04/hr | ~200ms |
+| `mistral` | voxtral-mini-latest | $0.001/min | ~500ms |
 
-For Groq, set `GROQ_API_KEY` instead of `OPENAI_API_KEY`.
+Set the corresponding environment variable for your backend:
+- OpenAI: `OPENAI_API_KEY`
+- Groq: `GROQ_API_KEY`
+- Mistral: `MISTRAL_API_KEY`
 
 The `prompt` helps Whisper with:
 - British vs American spelling (colour, favour, organisation)
@@ -297,7 +320,49 @@ inoremap <C-@> <Nop>
 
 ### Wayland
 
-xdotool has limited Wayland support. Consider using X11 or switching to ydotool.
+For Wayland, use clipboard mode with auto-paste:
+
+```toml
+[output]
+mode = "clipboard"
+auto_paste = true
+```
+
+This requires `wl-clipboard` and `ydotool`:
+
+```bash
+# Fedora
+sudo dnf install wl-clipboard ydotool
+
+# Ubuntu/Debian
+sudo apt install wl-clipboard ydotool
+```
+
+Start the ydotool daemon before using auto-paste:
+
+```bash
+# Allow access to uinput
+sudo chmod 666 /dev/uinput
+
+# Start daemon
+ydotoold &
+```
+
+For permanent setup, create a systemd user service for ydotoold.
+
+### Mouse Button Trigger
+
+Configure a mouse button to trigger recording (useful for hands-free operation):
+
+```toml
+[mouse]
+button = "button9"  # forward thumb button
+```
+
+Find your button number with `xev | grep button` and click the button. Common values:
+- `button8` - back thumb button
+- `button9` - forward thumb button
+- `middle` - middle click
 
 ### Permission errors with pynput
 

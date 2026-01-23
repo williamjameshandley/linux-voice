@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-from pynput import keyboard
+from pynput import keyboard, mouse
 
 # Minimum recording duration in seconds (avoid accidental triggers)
 MIN_RECORDING_SECONDS = 0.3
@@ -42,15 +42,44 @@ LANGUAGE = CONFIG.get("transcription", {}).get("language", "en")
 PROMPT = CONFIG.get("transcription", {}).get("prompt", "")
 REPLACEMENTS = CONFIG.get("replacements", {})
 
+# Output mode: "type" (xdotool) or "clipboard" (wl-copy/xclip)
+OUTPUT_MODE = CONFIG.get("output", {}).get("mode", "type")
+# Auto-paste after copying to clipboard (uses ydotool for Wayland, xdotool for X11)
+AUTO_PASTE = CONFIG.get("output", {}).get("auto_paste", False)
+# Paste shortcut: "ctrl+v" or "ctrl+shift+v" (plain text paste, works better in some apps)
+PASTE_SHORTCUT = CONFIG.get("output", {}).get("paste_shortcut", "ctrl+v")
+
 # Backend configuration (openai or groq)
 BACKEND = CONFIG.get("transcription", {}).get("backend", "openai")
 WHISPER_MODEL = CONFIG.get("transcription", {}).get("model", None)
 if WHISPER_MODEL is None:
-    WHISPER_MODEL = "whisper-large-v3-turbo" if BACKEND == "groq" else "whisper-1"
+    if BACKEND == "groq":
+        WHISPER_MODEL = "whisper-large-v3-turbo"
+    elif BACKEND == "mistral":
+        WHISPER_MODEL = "voxtral-mini-latest"
+    else:
+        WHISPER_MODEL = "whisper-1"
 MODE = os.environ.get(
     "LINUX_VOICE_MODE",
     CONFIG.get("hotkey", {}).get("mode", "hold"),
 )
+
+# Mouse button configuration (optional, e.g., "button8" for side button)
+_mouse_cfg = CONFIG.get("mouse", {})
+_mouse_button_cfg = _mouse_cfg.get("button", None)
+MOUSE_BUTTON = None
+if _mouse_button_cfg:
+    # Map button names to pynput Button enum or raw button numbers
+    if _mouse_button_cfg == "middle":
+        MOUSE_BUTTON = mouse.Button.middle
+    elif _mouse_button_cfg == "right":
+        MOUSE_BUTTON = mouse.Button.right
+    elif _mouse_button_cfg.startswith("button"):
+        # Raw button number (e.g., "button8" -> 8)
+        try:
+            MOUSE_BUTTON = int(_mouse_button_cfg.replace("button", ""))
+        except ValueError:
+            MOUSE_BUTTON = None
 
 # Hotkey configuration
 _hotkey_cfg = CONFIG.get("hotkey", {})
@@ -67,11 +96,12 @@ for mod in _modifier_names:
         HOTKEY_MODIFIERS.update({keyboard.Key.shift_l, keyboard.Key.shift_r})
     elif mod == "super":
         HOTKEY_MODIFIERS.update({keyboard.Key.cmd_l, keyboard.Key.cmd_r})
-if not HOTKEY_MODIFIERS:
+# Only default to Ctrl if modifiers key is not explicitly set
+if "modifiers" not in _hotkey_cfg and not HOTKEY_MODIFIERS:
     HOTKEY_MODIFIERS = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
 
 # For "all modifiers" check, we need one key per modifier type
-_required_modifier_types = set(_modifier_names) if _modifier_names else {"ctrl"}
+_required_modifier_types = set(_modifier_names) if (_modifier_names or "modifiers" in _hotkey_cfg) else {"ctrl"}
 
 # Submit hotkey (Ctrl+Shift+Space by default) - same as main hotkey but presses Enter after
 _submit_cfg = CONFIG.get("hotkey_submit", {})
@@ -132,10 +162,60 @@ def apply_replacements(text: str) -> str:
     return text
 
 
+def output_text(text: str) -> bool:
+    """Output text via clipboard (wl-copy) or xdotool type based on OUTPUT_MODE."""
+    import time
+    session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+
+    if OUTPUT_MODE == "clipboard":
+        # Use wl-copy for Wayland, fall back to xclip for X11
+        if session_type == "wayland":
+            result = subprocess.run(
+                ["wl-copy", "--type", "text/plain", "--", text],
+                check=False,
+            )
+        else:
+            result = subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=text.encode(),
+                check=False,
+            )
+        if result.returncode == 0:
+            if AUTO_PASTE:
+                # Small delay to ensure clipboard is ready
+                time.sleep(0.05)
+                # Paste using ydotool (Wayland) or xdotool (X11)
+                if session_type == "wayland":
+                    if PASTE_SHORTCUT == "ctrl+shift+v":
+                        # ydotool key: 29=ctrl, 42=shift, 47=v
+                        subprocess.run(["ydotool", "key", "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"], check=False)
+                    else:
+                        # ydotool key: 29=ctrl, 47=v
+                        subprocess.run(["ydotool", "key", "29:1", "47:1", "47:0", "29:0"], check=False)
+                else:
+                    subprocess.run(["xdotool", "key", PASTE_SHORTCUT.replace("+", "+")], check=False)
+                print("(pasted)")
+            else:
+                print("(copied to clipboard)")
+        return result.returncode == 0
+    else:
+        # Use xdotool type
+        result = subprocess.run(
+            ["xdotool", "type", "--delay", "0", "--", text],
+            check=False,
+        )
+        return result.returncode == 0
+
+
 def check_connectivity(timeout: float = 2.0) -> bool:
     """Quick check for internet connectivity to API endpoint."""
     import socket
-    host = "api.groq.com" if BACKEND == "groq" else "api.openai.com"
+    if BACKEND == "groq":
+        host = "api.groq.com"
+    elif BACKEND == "mistral":
+        host = "api.mistral.ai"
+    else:
+        host = "api.openai.com"
     try:
         socket.create_connection((host, 443), timeout=timeout)
         return True
@@ -151,6 +231,9 @@ def check_environment():
     if BACKEND == "groq":
         if not os.environ.get("GROQ_API_KEY"):
             errors.append("GROQ_API_KEY environment variable not set")
+    elif BACKEND == "mistral":
+        if not os.environ.get("MISTRAL_API_KEY"):
+            errors.append("MISTRAL_API_KEY environment variable not set")
     else:
         if not os.environ.get("OPENAI_API_KEY"):
             errors.append("OPENAI_API_KEY environment variable not set")
@@ -205,6 +288,12 @@ class VoiceRecorder:
         if BACKEND == "groq":
             from groq import Groq
             self.client = Groq()
+        elif BACKEND == "mistral":
+            from openai import OpenAI
+            self.client = OpenAI(
+                base_url="https://api.mistral.ai/v1",
+                api_key=os.environ.get("MISTRAL_API_KEY"),
+            )
         else:
             from openai import OpenAI
             self.client = OpenAI()
@@ -407,16 +496,29 @@ Instruction: {instruction}{context_note}"""
                 file_buffer.name = "audio.wav"
 
             # Transcribe
-            transcript = self.client.audio.transcriptions.create(
-                model=WHISPER_MODEL,
-                file=file_buffer,
-                language=LANGUAGE,
-                prompt=PROMPT,
-                response_format="text",
-                temperature=0.0,
-            )
-
-            text = transcript.strip()
+            if BACKEND == "mistral":
+                # Mistral doesn't support response_format="text", returns JSON
+                transcript = self.client.audio.transcriptions.create(
+                    model=WHISPER_MODEL,
+                    file=file_buffer,
+                )
+                # Parse JSON response
+                import json
+                if isinstance(transcript, str):
+                    data = json.loads(transcript)
+                    text = data.get("text", "").strip()
+                else:
+                    text = getattr(transcript, "text", str(transcript)).strip()
+            else:
+                transcript = self.client.audio.transcriptions.create(
+                    model=WHISPER_MODEL,
+                    file=file_buffer,
+                    language=LANGUAGE,
+                    prompt=PROMPT,
+                    response_format="text",
+                    temperature=0.0,
+                )
+                text = transcript.strip()
             if not text:
                 print("(no speech detected)")
                 return
@@ -427,18 +529,19 @@ Instruction: {instruction}{context_note}"""
                 self.recover_audio()
                 return
 
-            # Release any stuck modifiers before typing
-            subprocess.run(
-                ["xdotool", "keyup", "ctrl", "shift", "alt", "super"],
-                check=False,
-            )
-
-            # Restore focus to the original window (may have changed during API call)
-            if self.active_window_id:
+            # Release any stuck modifiers before typing (only for type mode)
+            if OUTPUT_MODE != "clipboard":
                 subprocess.run(
-                    ["xdotool", "windowactivate", "--sync", self.active_window_id],
+                    ["xdotool", "keyup", "ctrl", "shift", "alt", "super"],
                     check=False,
                 )
+
+                # Restore focus to the original window (may have changed during API call)
+                if self.active_window_id:
+                    subprocess.run(
+                        ["xdotool", "windowactivate", "--sync", self.active_window_id],
+                        check=False,
+                    )
 
             if edit:
                 # Edit mode: use transcription as instruction to correct previous text
@@ -449,30 +552,25 @@ Instruction: {instruction}{context_note}"""
                 print(f"\033[94m→ {corrected}\033[0m")
 
                 # Clear the line with Ctrl+U (works in terminals and many input fields)
-                subprocess.run(
-                    ["xdotool", "key", "ctrl+u"],
-                    check=False,
-                )
+                if OUTPUT_MODE != "clipboard":
+                    subprocess.run(
+                        ["xdotool", "key", "ctrl+u"],
+                        check=False,
+                    )
 
-                # Type corrected text
-                subprocess.run(
-                    ["xdotool", "type", "--delay", "0", "--", corrected],
-                    check=True,
-                )
+                # Output corrected text
+                output_text(corrected)
                 self.last_typed_text = corrected
             else:
-                # Normal mode: apply replacements and type
+                # Normal mode: apply replacements and output
                 text = apply_replacements(text)
                 print(f"\033[94m→ {text}\033[0m")
 
-                subprocess.run(
-                    ["xdotool", "type", "--delay", "0", "--", text],
-                    check=True,
-                )
+                output_text(text)
                 self.last_typed_text = text
 
-                # Press Enter if submit mode
-                if submit:
+                # Press Enter if submit mode (only for type mode)
+                if submit and OUTPUT_MODE != "clipboard":
                     import time
                     time.sleep(SUBMIT_DELAY / 1000)
                     subprocess.run(["xdotool", "key", "Return"], check=True)
@@ -571,9 +669,50 @@ Instruction: {instruction}{context_note}"""
             self.hotkey_pressed = False
             self.stop_recording()
 
+    def on_click(self, x, y, button, pressed):
+        """Handle mouse button events."""
+        if MOUSE_BUTTON is None:
+            return
+        # Compare button - handle both Button enum and raw int
+        button_match = False
+        if isinstance(MOUSE_BUTTON, int):
+            # For raw button numbers, pynput may pass Button.unknown or the raw value
+            if hasattr(button, 'value'):
+                button_match = (button.value == MOUSE_BUTTON)
+            elif isinstance(button, int):
+                button_match = (button == MOUSE_BUTTON)
+            else:
+                # Try string comparison for Button.unknown etc
+                button_match = (str(MOUSE_BUTTON) in str(button))
+        else:
+            button_match = (button == MOUSE_BUTTON)
+
+        if not button_match:
+            return
+
+        if MODE == "toggle":
+            if pressed:
+                if self.recording:
+                    self.stop_recording()
+                else:
+                    self.start_recording()
+        else:  # hold mode
+            if pressed:
+                if not self.hotkey_pressed:
+                    self.hotkey_pressed = True
+                    self.start_recording()
+            else:
+                if self.hotkey_pressed:
+                    self.hotkey_pressed = False
+                    self.stop_recording()
+
     def run(self):
         # Format hotkey names for display
-        hotkey_str = "+".join(m.capitalize() for m in _required_modifier_types) + "+Space"
+        key_display = _key_name.replace("_", " ").title()
+        if _required_modifier_types:
+            hotkey_str = "+".join(m.capitalize() for m in _required_modifier_types) + "+" + key_display
+        else:
+            hotkey_str = key_display
         submit_str = "+".join(m.capitalize() for m in _submit_modifier_types) + "+Space"
         edit_str = "+".join(m.capitalize() for m in _edit_modifier_types) + "+Space"
 
@@ -581,16 +720,27 @@ Instruction: {instruction}{context_note}"""
         print(f"  {hotkey_str}: {'toggle' if MODE == 'toggle' else 'hold to'} record")
         print(f"  {submit_str}: record and submit (press Enter)")
         print(f"  {edit_str}: record correction instruction")
+        if MOUSE_BUTTON:
+            print(f"  Mouse button: {'toggle' if MODE == 'toggle' else 'hold to'} record")
         print("Press Ctrl+C to exit\n")
 
         try:
-            with keyboard.Listener(
+            # Start keyboard listener
+            kb_listener = keyboard.Listener(
                 on_press=self.on_press,
                 on_release=self.on_release,
-            ) as listener:
-                listener.join()
+            )
+            kb_listener.start()
+
+            # Start mouse listener if configured
+            if MOUSE_BUTTON:
+                mouse_listener = mouse.Listener(on_click=self.on_click)
+                mouse_listener.start()
+
+            # Wait for keyboard listener (main thread)
+            kb_listener.join()
         except Exception as e:
-            print(f"\033[91mKeyboard listener error: {e}\033[0m")
+            print(f"\033[91mListener error: {e}\033[0m")
             print("Make sure you're running on X11 with proper permissions.")
             sys.exit(1)
 
