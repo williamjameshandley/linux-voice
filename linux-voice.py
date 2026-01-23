@@ -94,11 +94,12 @@ for mod in _modifier_names:
         HOTKEY_MODIFIERS.update({keyboard.Key.shift_l, keyboard.Key.shift_r})
     elif mod == "super":
         HOTKEY_MODIFIERS.update({keyboard.Key.cmd_l, keyboard.Key.cmd_r})
-if not HOTKEY_MODIFIERS:
+# Only default to Ctrl if modifiers key is not explicitly set
+if "modifiers" not in _hotkey_cfg and not HOTKEY_MODIFIERS:
     HOTKEY_MODIFIERS = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
 
 # For "all modifiers" check, we need one key per modifier type
-_required_modifier_types = set(_modifier_names) if _modifier_names else {"ctrl"}
+_required_modifier_types = set(_modifier_names) if (_modifier_names or "modifiers" in _hotkey_cfg) else {"ctrl"}
 
 # Submit hotkey (Ctrl+Shift+Space by default) - same as main hotkey but presses Enter after
 _submit_cfg = CONFIG.get("hotkey_submit", {})
