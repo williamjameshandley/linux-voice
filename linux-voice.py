@@ -44,8 +44,10 @@ REPLACEMENTS = CONFIG.get("replacements", {})
 
 # Output mode: "type" (xdotool) or "clipboard" (wl-copy/xclip)
 OUTPUT_MODE = CONFIG.get("output", {}).get("mode", "type")
-# Auto-paste after copying to clipboard (uses wtype for Wayland, xdotool for X11)
+# Auto-paste after copying to clipboard (uses ydotool for Wayland, xdotool for X11)
 AUTO_PASTE = CONFIG.get("output", {}).get("auto_paste", False)
+# Paste shortcut: "ctrl+v" or "ctrl+shift+v" (plain text paste, works better in some apps)
+PASTE_SHORTCUT = CONFIG.get("output", {}).get("paste_shortcut", "ctrl+v")
 
 # Backend configuration (openai or groq)
 BACKEND = CONFIG.get("transcription", {}).get("backend", "openai")
@@ -169,7 +171,7 @@ def output_text(text: str) -> bool:
         # Use wl-copy for Wayland, fall back to xclip for X11
         if session_type == "wayland":
             result = subprocess.run(
-                ["wl-copy", "--", text],
+                ["wl-copy", "--type", "text/plain", "--", text],
                 check=False,
             )
         else:
@@ -184,10 +186,14 @@ def output_text(text: str) -> bool:
                 time.sleep(0.05)
                 # Paste using ydotool (Wayland) or xdotool (X11)
                 if session_type == "wayland":
-                    # ydotool key: 29=ctrl, 47=v
-                    subprocess.run(["ydotool", "key", "29:1", "47:1", "47:0", "29:0"], check=False)
+                    if PASTE_SHORTCUT == "ctrl+shift+v":
+                        # ydotool key: 29=ctrl, 42=shift, 47=v
+                        subprocess.run(["ydotool", "key", "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"], check=False)
+                    else:
+                        # ydotool key: 29=ctrl, 47=v
+                        subprocess.run(["ydotool", "key", "29:1", "47:1", "47:0", "29:0"], check=False)
                 else:
-                    subprocess.run(["xdotool", "key", "ctrl+v"], check=False)
+                    subprocess.run(["xdotool", "key", PASTE_SHORTCUT.replace("+", "+")], check=False)
                 print("(pasted)")
             else:
                 print("(copied to clipboard)")
