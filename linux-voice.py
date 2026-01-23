@@ -702,7 +702,11 @@ Instruction: {instruction}{context_note}"""
 
     def run(self):
         # Format hotkey names for display
-        hotkey_str = "+".join(m.capitalize() for m in _required_modifier_types) + "+Space"
+        key_display = _key_name.replace("_", " ").title()
+        if _required_modifier_types:
+            hotkey_str = "+".join(m.capitalize() for m in _required_modifier_types) + "+" + key_display
+        else:
+            hotkey_str = key_display
         submit_str = "+".join(m.capitalize() for m in _submit_modifier_types) + "+Space"
         edit_str = "+".join(m.capitalize() for m in _edit_modifier_types) + "+Space"
 
