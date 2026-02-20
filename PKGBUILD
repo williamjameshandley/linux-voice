@@ -21,16 +21,22 @@ optdepends=(
 )
 source=(
     'linux-voice.py'
+    'platform_support.py'
     'linux-voice.service'
     'README.md'
     'LICENSE'
 )
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 package() {
 
-    # Install main script
-    install -Dm755 linux-voice.py "$pkgdir/usr/bin/linux-voice"
+    # Install main script and platform support module
+    install -Dm755 linux-voice.py "$pkgdir/usr/lib/$pkgname/linux-voice.py"
+    install -Dm644 platform_support.py "$pkgdir/usr/lib/$pkgname/platform_support.py"
+
+    # Create symlink in /usr/bin
+    mkdir -p "$pkgdir/usr/bin"
+    ln -s "/usr/lib/$pkgname/linux-voice.py" "$pkgdir/usr/bin/linux-voice"
 
     # Install systemd user service
     install -Dm644 linux-voice.service "$pkgdir/usr/lib/systemd/user/linux-voice.service"

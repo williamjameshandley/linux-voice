@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-linux-voice: Voice-to-text dictation tool for Linux (X11)
+linux-voice: Voice-to-text dictation tool for Linux (X11) and macOS
 
 Hold Ctrl+Space to record, release to transcribe and type.
 Toggle mode: Press Ctrl+Space to start, press again to stop.
@@ -17,7 +17,11 @@ import threading
 import wave
 from pathlib import Path
 
+# Ensure platform_support.py is importable regardless of working directory
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
+
 import numpy as np
+from platform_support import get_platform
 import sounddevice as sd
 from pynput import keyboard
 
@@ -52,28 +56,46 @@ MODE = os.environ.get(
     CONFIG.get("hotkey", {}).get("mode", "hold"),
 )
 
+# Platform-aware hotkey defaults
+# macOS: Cmd+Shift+Space (avoids Spotlight and input source switching conflicts)
+# Linux: Ctrl+Space
+_IS_MACOS = sys.platform == "darwin"
+_DEFAULT_RECORD_MODS = ["cmd", "shift"] if _IS_MACOS else ["ctrl"]
+_DEFAULT_SUBMIT_MODS = ["cmd", "shift", "ctrl"] if _IS_MACOS else ["ctrl", "shift"]
+_DEFAULT_EDIT_MODS = ["cmd", "alt"] if _IS_MACOS else ["ctrl", "alt"]
+
+
+def _parse_modifiers(modifier_names: list[str]) -> set:
+    """Parse modifier name list into pynput key set."""
+    mods = set()
+    for mod in modifier_names:
+        if mod == "ctrl":
+            mods.update({keyboard.Key.ctrl_l, keyboard.Key.ctrl_r})
+        elif mod == "alt":
+            mods.update({keyboard.Key.alt_l, keyboard.Key.alt_r})
+        elif mod == "shift":
+            mods.update({keyboard.Key.shift_l, keyboard.Key.shift_r})
+        elif mod in ("super", "cmd"):
+            mods.update({keyboard.Key.cmd_l, keyboard.Key.cmd_r})
+    return mods
+
+
 # Hotkey configuration
 _hotkey_cfg = CONFIG.get("hotkey", {})
 _key_name = _hotkey_cfg.get("key", "space")
 HOTKEY_KEY = getattr(keyboard.Key, _key_name, keyboard.KeyCode.from_char(_key_name))
-_modifier_names = _hotkey_cfg.get("modifiers", ["ctrl"])
-HOTKEY_MODIFIERS = set()
-for mod in _modifier_names:
-    if mod == "ctrl":
-        HOTKEY_MODIFIERS.update({keyboard.Key.ctrl_l, keyboard.Key.ctrl_r})
-    elif mod == "alt":
-        HOTKEY_MODIFIERS.update({keyboard.Key.alt_l, keyboard.Key.alt_r})
-    elif mod == "shift":
-        HOTKEY_MODIFIERS.update({keyboard.Key.shift_l, keyboard.Key.shift_r})
-    elif mod == "super":
-        HOTKEY_MODIFIERS.update({keyboard.Key.cmd_l, keyboard.Key.cmd_r})
+_modifier_names = _hotkey_cfg.get("modifiers", _DEFAULT_RECORD_MODS)
+HOTKEY_MODIFIERS = _parse_modifiers(_modifier_names)
 if not HOTKEY_MODIFIERS:
-    HOTKEY_MODIFIERS = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
+    HOTKEY_MODIFIERS = _parse_modifiers(_DEFAULT_RECORD_MODS)
 
 # For "all modifiers" check, we need one key per modifier type
-_required_modifier_types = set(_modifier_names) if _modifier_names else {"ctrl"}
+# Normalize "cmd" to "super" for consistent checking
+_required_modifier_types = set(
+    "super" if m == "cmd" else m for m in (_modifier_names or _DEFAULT_RECORD_MODS)
+)
 
-# Submit hotkey (Ctrl+Shift+Space by default) - same as main hotkey but presses Enter after
+# Submit hotkey - same as main hotkey but presses Enter after
 _submit_cfg = CONFIG.get("hotkey_submit", {})
 SUBMIT_DELAY = _submit_cfg.get("delay", 150)  # ms delay before Enter key
 SUBMIT_KEY = getattr(
@@ -81,42 +103,28 @@ SUBMIT_KEY = getattr(
     _submit_cfg.get("key", "space"),
     keyboard.KeyCode.from_char(_submit_cfg.get("key", "space")),
 )
-_submit_modifier_names = _submit_cfg.get("modifiers", ["ctrl", "shift"])
-SUBMIT_MODIFIERS = set()
-for mod in _submit_modifier_names:
-    if mod == "ctrl":
-        SUBMIT_MODIFIERS.update({keyboard.Key.ctrl_l, keyboard.Key.ctrl_r})
-    elif mod == "alt":
-        SUBMIT_MODIFIERS.update({keyboard.Key.alt_l, keyboard.Key.alt_r})
-    elif mod == "shift":
-        SUBMIT_MODIFIERS.update({keyboard.Key.shift_l, keyboard.Key.shift_r})
-    elif mod == "super":
-        SUBMIT_MODIFIERS.update({keyboard.Key.cmd_l, keyboard.Key.cmd_r})
+_submit_modifier_names = _submit_cfg.get("modifiers", _DEFAULT_SUBMIT_MODS)
+SUBMIT_MODIFIERS = _parse_modifiers(_submit_modifier_names)
 if not SUBMIT_MODIFIERS:
-    SUBMIT_MODIFIERS = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r, keyboard.Key.shift_l, keyboard.Key.shift_r}
-_submit_modifier_types = set(_submit_modifier_names) if _submit_modifier_names else {"ctrl", "shift"}
+    SUBMIT_MODIFIERS = _parse_modifiers(_DEFAULT_SUBMIT_MODS)
+_submit_modifier_types = set(
+    "super" if m == "cmd" else m for m in (_submit_modifier_names or _DEFAULT_SUBMIT_MODS)
+)
 
-# Edit hotkey (Ctrl+Alt+Space by default) - corrects last transcription via LLM
+# Edit hotkey - corrects last transcription via LLM
 _edit_cfg = CONFIG.get("hotkey_edit", {})
 EDIT_KEY = getattr(
     keyboard.Key,
     _edit_cfg.get("key", "space"),
     keyboard.KeyCode.from_char(_edit_cfg.get("key", "space")),
 )
-_edit_modifier_names = _edit_cfg.get("modifiers", ["ctrl", "alt"])
-EDIT_MODIFIERS = set()
-for mod in _edit_modifier_names:
-    if mod == "ctrl":
-        EDIT_MODIFIERS.update({keyboard.Key.ctrl_l, keyboard.Key.ctrl_r})
-    elif mod == "alt":
-        EDIT_MODIFIERS.update({keyboard.Key.alt_l, keyboard.Key.alt_r})
-    elif mod == "shift":
-        EDIT_MODIFIERS.update({keyboard.Key.shift_l, keyboard.Key.shift_r})
-    elif mod == "super":
-        EDIT_MODIFIERS.update({keyboard.Key.cmd_l, keyboard.Key.cmd_r})
+_edit_modifier_names = _edit_cfg.get("modifiers", _DEFAULT_EDIT_MODS)
+EDIT_MODIFIERS = _parse_modifiers(_edit_modifier_names)
 if not EDIT_MODIFIERS:
-    EDIT_MODIFIERS = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r, keyboard.Key.alt_l, keyboard.Key.alt_r}
-_edit_modifier_types = set(_edit_modifier_names) if _edit_modifier_names else {"ctrl", "alt"}
+    EDIT_MODIFIERS = _parse_modifiers(_DEFAULT_EDIT_MODS)
+_edit_modifier_types = set(
+    "super" if m == "cmd" else m for m in (_edit_modifier_names or _DEFAULT_EDIT_MODS)
+)
 
 # LLM model for corrections (per backend)
 LLM_MODEL = CONFIG.get("transcription", {}).get("llm_model", None)
@@ -143,34 +151,26 @@ def check_connectivity(timeout: float = 2.0) -> bool:
         return False
 
 
-def check_environment():
+def check_environment(platform):
     """Check for required dependencies and environment."""
     errors = []
 
-    # Check for API key based on backend
+    # Check for API key: environment variable first, then config.toml fallback
     if BACKEND == "groq":
-        if not os.environ.get("GROQ_API_KEY"):
-            errors.append("GROQ_API_KEY environment variable not set")
+        api_key = os.environ.get("GROQ_API_KEY") or CONFIG.get("transcription", {}).get("api_key", "")
+        if not api_key:
+            errors.append("GROQ_API_KEY not set. Set env var or add api_key to [transcription] in config.toml")
+        else:
+            os.environ["GROQ_API_KEY"] = api_key
     else:
-        if not os.environ.get("OPENAI_API_KEY"):
-            errors.append("OPENAI_API_KEY environment variable not set")
+        api_key = os.environ.get("OPENAI_API_KEY") or CONFIG.get("transcription", {}).get("api_key", "")
+        if not api_key:
+            errors.append("OPENAI_API_KEY not set. Set env var or add api_key to [transcription] in config.toml")
+        else:
+            os.environ["OPENAI_API_KEY"] = api_key
 
-    # Check for xdotool
-    if not shutil.which("xdotool"):
-        errors.append("xdotool not found. Install with: sudo pacman -S xdotool")
-
-    # Check for ffmpeg (optional but recommended for MP3 compression)
-    if not shutil.which("ffmpeg"):
-        print("\033[93mWarning: ffmpeg not found. Using uncompressed WAV (slower uploads).\033[0m")
-        print("Install with: sudo pacman -S ffmpeg\n")
-
-    # Warn about Wayland
-    session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
-    if session_type == "wayland":
-        print(
-            "\033[93mWarning: Running on Wayland. xdotool may not work correctly.\n"
-            "Consider using X11 or ydotool for Wayland.\033[0m\n"
-        )
+    # Platform-specific checks (xdotool on Linux, Accessibility on macOS, etc.)
+    errors.extend(platform.check_environment())
 
     if errors:
         for err in errors:
@@ -197,13 +197,14 @@ def _has_all_modifiers(pressed: set, required_types: set) -> bool:
 
 
 class VoiceRecorder:
-    def __init__(self):
+    def __init__(self, platform):
         if BACKEND == "groq":
             from groq import Groq
             self.client = Groq()
         else:
             from openai import OpenAI
             self.client = OpenAI()
+        self.platform = platform
         self.recording = False
         self.audio_data = []
         self.stream = None
@@ -213,7 +214,7 @@ class VoiceRecorder:
         self.submit_mode = False  # Whether to press Enter after typing
         self.edit_mode = False  # Whether to correct last transcription
         self.last_typed_text = ""  # Store for edit mode corrections
-        self.active_window_id = None  # Window to type into
+        self.active_app = None  # App/window to type into
 
     def _convert_to_mp3(self, audio: np.ndarray) -> io.BytesIO:
         """Convert numpy audio to MP3 using ffmpeg."""
@@ -288,17 +289,11 @@ Instruction: {instruction}{context_note}"""
         self.audio_data = []
         self.submit_mode = submit
         self.edit_mode = edit
-        # Capture active window for later focus restoration
+        # Capture active window/app for later focus restoration
         try:
-            result = subprocess.run(
-                ["xdotool", "getactivewindow"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            self.active_window_id = result.stdout.strip()
+            self.active_app = self.platform.get_active_app()
         except Exception:
-            self.active_window_id = None
+            self.active_app = None
         if edit:
             indicator = "● Recording edit instruction..."
         elif submit:
@@ -318,7 +313,7 @@ Instruction: {instruction}{context_note}"""
                 samplerate=SAMPLE_RATE,
                 channels=CHANNELS,
                 dtype=np.int16,
-                device="default",
+                device=None,
                 callback=callback,
             )
             self.stream.start()
@@ -354,7 +349,8 @@ Instruction: {instruction}{context_note}"""
 
         # Transcribe in background to not block hotkey listener
         threading.Thread(
-            target=self._transcribe_and_type, args=(audio, self.submit_mode, self.edit_mode)
+            target=self._transcribe_and_type, args=(audio, self.submit_mode, self.edit_mode),
+            daemon=True,
         ).start()
 
     def _transcribe_and_type(self, audio: np.ndarray, submit: bool = False, edit: bool = False):
@@ -368,10 +364,10 @@ Instruction: {instruction}{context_note}"""
                 recovery_path = Path("/tmp/linux-voice-recovery.wav")
                 if recovery_path.exists():
                     # Don't overwrite - just remind user to recover first
-                    subprocess.run(
-                        ["xdotool", "type", "--delay", "0", "--", "(no internet - say 'recover' first)"],
-                        check=False,
-                    )
+                    try:
+                        self.platform.type_text("(no internet - say 'recover' first)")
+                    except Exception:
+                        pass
                 else:
                     with wave.open(str(recovery_path), "wb") as wf:
                         wf.setnchannels(CHANNELS)
@@ -379,10 +375,10 @@ Instruction: {instruction}{context_note}"""
                         wf.setframerate(SAMPLE_RATE)
                         wf.writeframes(audio.tobytes())
                     print(f"Audio saved to {recovery_path}")
-                    subprocess.run(
-                        ["xdotool", "type", "--delay", "0", "--", "(no internet - say 'recover' to retry)"],
-                        check=False,
-                    )
+                    try:
+                        self.platform.type_text("(no internet - say 'recover' to retry)")
+                    except Exception:
+                        pass
                 return
 
             # Convert to MP3 if ffmpeg available, otherwise WAV
@@ -421,17 +417,10 @@ Instruction: {instruction}{context_note}"""
                 return
 
             # Release any stuck modifiers before typing
-            subprocess.run(
-                ["xdotool", "keyup", "ctrl", "shift", "alt", "super"],
-                check=False,
-            )
+            self.platform.release_modifiers()
 
             # Restore focus to the original window (may have changed during API call)
-            if self.active_window_id:
-                subprocess.run(
-                    ["xdotool", "windowactivate", "--sync", self.active_window_id],
-                    check=False,
-                )
+            self.platform.restore_focus(self.active_app)
 
             if edit:
                 # Edit mode: use transcription as instruction to correct previous text
@@ -441,37 +430,25 @@ Instruction: {instruction}{context_note}"""
                 corrected = self._correct_with_llm(self.last_typed_text, instruction)
                 print(f"\033[94m→ {corrected}\033[0m ({time.time()-t0:.1f}s)", flush=True)
 
-                # Clear the line with Ctrl+U (works in terminals and many input fields)
-                subprocess.run(
-                    ["xdotool", "key", "ctrl+u"],
-                    check=False,
-                )
+                # Clear the current line
+                self.platform.clear_line()
 
                 # Type corrected text
-                subprocess.run(
-                    ["xdotool", "type", "--delay", "0", "--", corrected],
-                    check=True,
-                )
+                self.platform.type_text(corrected)
                 self.last_typed_text = corrected
             else:
                 # Normal mode: apply replacements and type
                 text = apply_replacements(text)
                 print(f"\033[94m→ {text}\033[0m ({t1-t0:.1f}s)", flush=True)
 
-                subprocess.run(
-                    ["xdotool", "type", "--delay", "0", "--", text],
-                    check=True,
-                )
+                self.platform.type_text(text)
                 self.last_typed_text = text
 
                 # Press Enter if submit mode
                 if submit:
                     import time
                     time.sleep(SUBMIT_DELAY / 1000)
-                    subprocess.run(["xdotool", "key", "Return"], check=True)
-
-        except FileNotFoundError:
-            print("\033[91mError: xdotool not found. Install with: sudo pacman -S xdotool\033[0m")
+                    self.platform.press_key("Return")
         except Exception as e:
             print(f"\033[91mError: {e}\033[0m")
 
@@ -480,10 +457,10 @@ Instruction: {instruction}{context_note}"""
         recovery_path = Path("/tmp/linux-voice-recovery.wav")
         if not recovery_path.exists():
             print("No recovery file found")
-            subprocess.run(
-                ["xdotool", "type", "--delay", "0", "--", "(no recovery file)"],
-                check=False,
-            )
+            try:
+                self.platform.type_text("(no recovery file)")
+            except Exception:
+                pass
             return
 
         # Load audio from recovery file
@@ -493,11 +470,12 @@ Instruction: {instruction}{context_note}"""
         print(f"Recovering audio from {recovery_path}...")
 
         # Clear the "no internet" message first
-        subprocess.run(["xdotool", "key", "ctrl+u"], check=False)
+        self.platform.clear_line()
 
         # Transcribe in background
         threading.Thread(
-            target=self._transcribe_and_type, args=(audio, False, False)
+            target=self._transcribe_and_type, args=(audio, False, False),
+            daemon=True,
         ).start()
 
         # Remove recovery file
@@ -584,7 +562,10 @@ Instruction: {instruction}{context_note}"""
                 listener.join()
         except Exception as e:
             print(f"\033[91mKeyboard listener error: {e}\033[0m")
-            print("Make sure you're running on X11 with proper permissions.")
+            if sys.platform == "darwin":
+                print("Make sure Accessibility permissions are granted in System Settings.")
+            else:
+                print("Make sure you're running on X11 with proper permissions.")
             sys.exit(1)
 
 
@@ -595,14 +576,15 @@ def recover():
         print("No recovery file found")
         return
 
-    check_environment()
+    platform = get_platform()
+    check_environment(platform)
 
     # Load audio from recovery file
     with wave.open(str(recovery_path), "rb") as wf:
         audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
 
     print(f"Recovering audio from {recovery_path}...")
-    recorder = VoiceRecorder()
+    recorder = VoiceRecorder(platform)
     recorder._transcribe_and_type(audio, submit=False, edit=False)
 
     # Remove recovery file after successful transcription
@@ -610,13 +592,118 @@ def recover():
     print("Recovery file removed")
 
 
+def install_agent():
+    """Generate and install macOS LaunchAgent."""
+    if sys.platform != "darwin":
+        print("LaunchAgent installation is only for macOS.")
+        return
+
+    plist_dir = Path.home() / "Library" / "LaunchAgents"
+    plist_path = plist_dir / "com.linux-voice.agent.plist"
+    log_dir = Path.home() / "Library" / "Logs"
+
+    python_path = sys.executable
+    script_path = Path(__file__).resolve()
+
+    # Read API key from config or environment
+    api_key_name = "GROQ_API_KEY" if BACKEND == "groq" else "OPENAI_API_KEY"
+    api_key = (
+        CONFIG.get("transcription", {}).get("api_key", "")
+        or os.environ.get(api_key_name, "")
+    )
+
+    env_block = f"""        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>"""
+    if api_key:
+        env_block = f"""        <key>{api_key_name}</key>
+        <string>{api_key}</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>"""
+
+    plist_content = f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.linux-voice.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python_path}</string>
+        <string>-u</string>
+        <string>{script_path}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{script_path.parent}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{log_dir}/linux-voice.log</string>
+    <key>StandardErrorPath</key>
+    <string>{log_dir}/linux-voice.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+{env_block}
+    </dict>
+</dict>
+</plist>
+"""
+    plist_dir.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(plist_content)
+    print(f"Wrote {plist_path}")
+    print()
+    print("To start now and on every login:")
+    print(f"  launchctl bootstrap gui/$(id -u) {plist_path}")
+    print()
+    print("To restart after changes:")
+    print(f"  launchctl kickstart -k gui/$(id -u)/com.linux-voice.agent")
+    print()
+    print("To stop and remove:")
+    print(f"  launchctl bootout gui/$(id -u)/com.linux-voice.agent")
+
+
+def uninstall_agent():
+    """Remove macOS LaunchAgent."""
+    if sys.platform != "darwin":
+        print("LaunchAgent uninstallation is only for macOS.")
+        return
+
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.linux-voice.agent.plist"
+
+    # Try to unload first
+    uid = os.getuid()
+    subprocess.run(
+        ["launchctl", "bootout", f"gui/{uid}/com.linux-voice.agent"],
+        check=False,
+        capture_output=True,
+    )
+
+    if plist_path.exists():
+        plist_path.unlink()
+        print(f"Removed {plist_path}")
+    else:
+        print("LaunchAgent not installed.")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--install-agent":
+        install_agent()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--uninstall-agent":
+        uninstall_agent()
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] == "--recover":
         recover()
         return
 
-    check_environment()
-    recorder = VoiceRecorder()
+    platform = get_platform()
+    check_environment(platform)
+    recorder = VoiceRecorder(platform)
     try:
         recorder.run()
     except KeyboardInterrupt:
