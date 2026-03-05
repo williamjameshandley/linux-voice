@@ -83,7 +83,86 @@ curl -o ~/.local/bin/linux-voice https://raw.githubusercontent.com/williamjamesh
 chmod +x ~/.local/bin/linux-voice
 ```
 
-### API Key Setup
+### macOS (from scratch)
+
+#### 1. Install system dependencies
+
+```bash
+brew install ffmpeg uv
+```
+
+#### 2. Clone and set up the project
+
+```bash
+git clone https://github.com/williamjameshandley/linux-voice
+cd linux-voice
+uv sync --extra macos --extra groq   # or without --extra groq if using OpenAI
+```
+
+#### 3. Configure
+
+Get a free Groq API key at [groq.com](https://groq.com) (or use an OpenAI key).
+
+```bash
+mkdir -p ~/.config/linux-voice
+cat > ~/.config/linux-voice/config.toml << 'EOF'
+[transcription]
+backend = "groq"
+api_key = "your-groq-api-key-here"
+EOF
+```
+
+For OpenAI, omit the `backend` line and set your OpenAI key as `api_key`.
+
+#### 4. Grant permissions
+
+- **Accessibility:** System Settings > Privacy & Security > Accessibility — add `/bin/zsh` (click `+`, press Cmd+Shift+G, type `/bin/zsh`)
+- **Microphone:** Will be prompted on first run
+
+#### 5. Test manually
+
+```bash
+uv run python linux-voice.py
+```
+
+Hold **Cmd+Shift+Space**, speak, release. Text should appear in the focused window. Press Ctrl+C to stop.
+
+#### 6. Set up auto-start (LaunchAgent)
+
+```bash
+uv run python linux-voice.py --install-agent
+```
+
+This auto-generates the LaunchAgent plist with the correct paths and API key. Then start it:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.linux-voice.agent.plist
+```
+
+Voice dictation now works globally in any app via **Cmd+Shift+Space** and starts automatically on login.
+
+#### Managing the service
+
+```bash
+# View logs
+tail -f ~/Library/Logs/linux-voice.log
+
+# Restart after code changes
+launchctl kickstart -k gui/$(id -u)/com.linux-voice.agent
+
+# Uninstall (stop + remove)
+uv run python linux-voice.py --uninstall-agent
+```
+
+#### Default hotkeys on macOS
+
+| Hotkey | Action |
+|--------|--------|
+| `Cmd+Shift+Space` | Hold to record, release to transcribe |
+| `Cmd+Shift+Ctrl+Space` | Record and auto-press Enter |
+| `Cmd+Alt+Space` | Record correction instruction |
+
+### API Key Setup (Linux)
 
 Add to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
 ```bash
@@ -306,6 +385,17 @@ On some systems, you may need to run as root or add your user to the `input` gro
 sudo usermod -aG input $USER
 ```
 Then log out and back in.
+
+### macOS: Hotkeys not working
+
+- **Accessibility permissions:** Ensure your terminal app is listed in System Settings > Privacy & Security > Accessibility. Remove and re-add it if permissions were reset after a macOS update.
+- **Secure Input Mode:** When a password field is focused or `sudo` is running in terminal, macOS enables Secure Input which blocks global hotkey monitoring. Switch to a different window/app.
+- **Spotlight conflict:** The default `Cmd+Space` is taken by Spotlight. linux-voice defaults to `Cmd+Shift+Space` on macOS to avoid this.
+
+### macOS: Text not appearing
+
+- Text is injected via clipboard paste (`Cmd+V`). If the target app blocks paste, text injection will fail.
+- Some terminal apps (iTerm2) may prompt before pasting multi-line text.
 
 ## License
 

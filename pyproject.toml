@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linux-voice"
+version = "0.5.1"
+description = "Voice-to-text dictation tool for Linux (X11) and macOS"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "openai",
+    "pynput",
+    "sounddevice",
+]
+
+[project.optional-dependencies]
+groq = ["groq"]
+macos = [
+    "pyobjc-framework-Cocoa",
+    "pyobjc-framework-Quartz",
+    "pyobjc-framework-ApplicationServices",
+]
+
+[tool.setuptools]
+py-modules = ["platform_support"]
