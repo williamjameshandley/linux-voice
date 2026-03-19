@@ -215,6 +215,7 @@ class VoiceRecorder:
         self.edit_mode = False  # Whether to correct last transcription
         self.last_typed_text = ""  # Store for edit mode corrections
         self.active_app = None  # App/window to type into
+        self._consecutive_audio_errors = 0
 
     def _convert_to_mp3(self, audio: np.ndarray) -> io.BytesIO:
         """Convert numpy audio to MP3 using ffmpeg."""
@@ -318,10 +319,15 @@ Instruction: {instruction}{context_note}"""
             )
             self.stream.start()
             self.recording = True
+            self._consecutive_audio_errors = 0
         except Exception as e:
             self.recording = False
             self.hotkey_pressed = False
+            self._consecutive_audio_errors += 1
             print(f"\033[91mAudio error: {e}\033[0m", flush=True)
+            if self._consecutive_audio_errors >= 3:
+                print("Too many audio errors, restarting...", flush=True)
+                os._exit(0)  # launchd KeepAlive will restart us
 
     def stop_recording(self):
         if not self.recording:
