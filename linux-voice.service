@@ -10,8 +10,7 @@ ExecStart=/usr/bin/linux-voice
 Restart=on-failure
 RestartSec=5
 
-# Ensure access to audio and display
-Environment=DISPLAY=:0
+# Inherit DISPLAY from graphical-session environment
 
 [Install]
 WantedBy=graphical-session.target
