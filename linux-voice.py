@@ -352,6 +352,7 @@ Instruction: {instruction}{context_note}"""
 
         if not self.audio_data:
             print("No audio recorded")
+            log_ledger("insert", "", self._window_title(), "no-audio")
             return
 
         # Combine audio chunks
@@ -361,6 +362,8 @@ Instruction: {instruction}{context_note}"""
         duration = len(audio) / SAMPLE_RATE
         if duration < MIN_RECORDING_SECONDS:
             print(f"(recording too short: {duration:.1f}s)")
+            log_ledger("insert", "", self._window_title(),
+                       f"too-short: {duration:.1f}s")
             return
 
         print("\033[93m◌ Processing...\033[0m", flush=True)
