@@ -9,11 +9,13 @@ Requires Python 3.11+ for tomllib.
 """
 
 import io
+import json
 import os
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import wave
 from pathlib import Path
 
@@ -94,6 +96,22 @@ if not HOTKEY_MODIFIERS:
 _required_modifier_types = set(
     "super" if m == "cmd" else m for m in (_modifier_names or _DEFAULT_RECORD_MODS)
 )
+
+# Utterance ledger: every transcription outcome is appended here (including
+# failures), so text typed into the wrong window is recoverable by lookup.
+LEDGER_PATH = (
+    Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+    / "linux-voice" / "ledger.jsonl"
+)
+
+
+def log_ledger(mode: str, text: str, window: str, result: str):
+    LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"ts": int(time.time()), "mode": mode, "text": text,
+             "window_title": window, "result": result}
+    with LEDGER_PATH.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
 
 # Submit hotkey - same as main hotkey but presses Enter after
 _submit_cfg = CONFIG.get("hotkey_submit", {})
@@ -353,13 +371,26 @@ Instruction: {instruction}{context_note}"""
             daemon=True,
         ).start()
 
+    def _window_title(self):
+        """Best-effort human-readable name for the captured focus window."""
+        try:
+            return subprocess.run(
+                ["xdotool", "getwindowname", str(self.active_app)],
+                capture_output=True, text=True,
+            ).stdout.strip() or str(self.active_app)
+        except Exception:
+            return str(self.active_app)
+
     def _transcribe_and_type(self, audio: np.ndarray, submit: bool = False, edit: bool = False):
         import time
         t0 = time.time()
+        mode = "edit" if edit else ("submit" if submit else "insert")
+        window = self._window_title()
         try:
             # Check internet connectivity
             if not check_connectivity():
                 print("\033[91mNo internet connection\033[0m")
+                log_ledger(mode, "", window, "no-internet")
                 # Save audio to temp file for potential recovery (don't overwrite existing)
                 recovery_path = Path("/tmp/linux-voice-recovery.wav")
                 if recovery_path.exists():
@@ -408,11 +439,13 @@ Instruction: {instruction}{context_note}"""
             text = transcript.strip()
             if not text:
                 print("(no speech detected)")
+                log_ledger(mode, "", window, "no-speech")
                 return
 
             # Check for voice commands
             if text.lower() in ("recover", "recover.", "recovery", "recovery."):
                 print("Voice command: recover")
+                log_ledger(mode, text, window, "recover-command")
                 self.recover_audio()
                 return
 
@@ -436,6 +469,7 @@ Instruction: {instruction}{context_note}"""
                 # Type corrected text
                 self.platform.type_text(corrected)
                 self.last_typed_text = corrected
+                log_ledger(mode, corrected, window, "typed")
             else:
                 # Normal mode: apply replacements and type
                 text = apply_replacements(text)
@@ -443,6 +477,8 @@ Instruction: {instruction}{context_note}"""
 
                 self.platform.type_text(text)
                 self.last_typed_text = text
+                log_ledger(mode, text, window,
+                           "typed+submitted" if submit else "typed")
 
                 # Press Enter if submit mode
                 if submit:
@@ -451,6 +487,7 @@ Instruction: {instruction}{context_note}"""
                     self.platform.press_key("Return")
         except Exception as e:
             print(f"\033[91mError: {e}\033[0m")
+            log_ledger(mode, "", window, f"error: {e}")
 
     def recover_audio(self):
         """Recover and transcribe audio from a failed attempt."""
