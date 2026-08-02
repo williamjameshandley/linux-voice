@@ -19,7 +19,7 @@ import time
 import wave
 from pathlib import Path
 
-# Ensure platform_support.py is importable regardless of working directory
+# Resolve the /usr/bin symlink so the packaged sibling module is importable.
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 
 import numpy as np
@@ -30,7 +30,6 @@ from pynput import keyboard
 # Minimum recording duration in seconds (avoid accidental triggers)
 MIN_RECORDING_SECONDS = 0.3
 
-# Load config from ~/.config/linux-voice/config.toml if it exists
 CONFIG = {}
 CONFIG_PATH = Path.home() / ".config" / "linux-voice" / "config.toml"
 if CONFIG_PATH.exists():
@@ -41,14 +40,12 @@ if CONFIG_PATH.exists():
         print(f"\033[91mConfig error in {CONFIG_PATH}: {e}. Using defaults.\033[0m")
         CONFIG = {}
 
-# Configuration with defaults
 SAMPLE_RATE = CONFIG.get("audio", {}).get("sample_rate", 16000)  # Whisper native rate
 CHANNELS = 1
 LANGUAGE = CONFIG.get("transcription", {}).get("language", "en")
 PROMPT = CONFIG.get("transcription", {}).get("prompt", "")
 REPLACEMENTS = CONFIG.get("replacements", {})
 
-# Backend configuration (openai or groq)
 BACKEND = CONFIG.get("transcription", {}).get("backend", "openai")
 WHISPER_MODEL = CONFIG.get("transcription", {}).get("model", None)
 if WHISPER_MODEL is None:
@@ -82,7 +79,6 @@ def _parse_modifiers(modifier_names: list[str]) -> set:
     return mods
 
 
-# Hotkey configuration
 _hotkey_cfg = CONFIG.get("hotkey", {})
 _key_name = _hotkey_cfg.get("key", "space")
 HOTKEY_KEY = getattr(keyboard.Key, _key_name, keyboard.KeyCode.from_char(_key_name))
@@ -113,7 +109,6 @@ def log_ledger(mode: str, text: str, window: str, result: str):
         f.write(json.dumps(entry) + "\n")
 
 
-# Submit hotkey - same as main hotkey but presses Enter after
 _submit_cfg = CONFIG.get("hotkey_submit", {})
 SUBMIT_DELAY = _submit_cfg.get("delay", 150)  # ms delay before Enter key
 SUBMIT_KEY = getattr(
@@ -129,7 +124,6 @@ _submit_modifier_types = set(
     "super" if m == "cmd" else m for m in (_submit_modifier_names or _DEFAULT_SUBMIT_MODS)
 )
 
-# Edit hotkey - corrects last transcription via LLM
 _edit_cfg = CONFIG.get("hotkey_edit", {})
 EDIT_KEY = getattr(
     keyboard.Key,
@@ -144,7 +138,6 @@ _edit_modifier_types = set(
     "super" if m == "cmd" else m for m in (_edit_modifier_names or _DEFAULT_EDIT_MODS)
 )
 
-# LLM model for corrections (per backend)
 LLM_MODEL = CONFIG.get("transcription", {}).get("llm_model", None)
 if LLM_MODEL is None:
     LLM_MODEL = "llama-3.3-70b-versatile" if BACKEND == "groq" else "gpt-4o-mini"
@@ -173,7 +166,6 @@ def check_environment(platform):
     """Check for required dependencies and environment."""
     errors = []
 
-    # Check for API key: environment variable first, then config.toml fallback
     if BACKEND == "groq":
         api_key = os.environ.get("GROQ_API_KEY") or CONFIG.get("transcription", {}).get("api_key", "")
         if not api_key:
@@ -187,7 +179,6 @@ def check_environment(platform):
         else:
             os.environ["OPENAI_API_KEY"] = api_key
 
-    # Platform-specific checks (xdotool on Linux, Accessibility on macOS, etc.)
     errors.extend(platform.check_environment())
 
     if errors:
@@ -308,7 +299,6 @@ Instruction: {instruction}{context_note}"""
         self.audio_data = []
         self.submit_mode = submit
         self.edit_mode = edit
-        # Capture active window/app for later focus restoration
         try:
             self.active_app = self.platform.get_active_app()
         except Exception:
@@ -361,10 +351,8 @@ Instruction: {instruction}{context_note}"""
             log_ledger("insert", "", self._window_title(), "no-audio")
             return
 
-        # Combine audio chunks
         audio = np.concatenate(self.audio_data, axis=0)
 
-        # Check minimum duration
         duration = len(audio) / SAMPLE_RATE
         if duration < MIN_RECORDING_SECONDS:
             print(f"(recording too short: {duration:.1f}s)")
@@ -374,7 +362,6 @@ Instruction: {instruction}{context_note}"""
 
         print("\033[93m◌ Processing...\033[0m", flush=True)
 
-        # Transcribe in background to not block hotkey listener
         threading.Thread(
             target=self._transcribe_and_type, args=(audio, self.submit_mode, self.edit_mode),
             daemon=True,
@@ -396,14 +383,12 @@ Instruction: {instruction}{context_note}"""
         mode = "edit" if edit else ("submit" if submit else "insert")
         window = self._window_title()
         try:
-            # Check internet connectivity
             if not check_connectivity():
                 print("\033[91mNo internet connection\033[0m")
                 log_ledger(mode, "", window, "no-internet")
-                # Save audio to temp file for potential recovery (don't overwrite existing)
+                # Preserve the first failed recording until it is explicitly recovered.
                 recovery_path = Path("/tmp/linux-voice-recovery.wav")
                 if recovery_path.exists():
-                    # Don't overwrite - just remind user to recover first
                     try:
                         self.platform.type_text("(no internet - say 'recover' first)")
                     except Exception:
@@ -421,7 +406,6 @@ Instruction: {instruction}{context_note}"""
                         pass
                 return
 
-            # Convert to MP3 if ffmpeg available, otherwise WAV
             if self.has_ffmpeg:
                 file_buffer = self._convert_to_mp3(audio)
             else:
@@ -434,7 +418,6 @@ Instruction: {instruction}{context_note}"""
                 file_buffer.seek(0)
                 file_buffer.name = "audio.wav"
 
-            # Transcribe
             transcript = self.client.audio.transcriptions.create(
                 model=WHISPER_MODEL,
                 file=file_buffer,
@@ -451,36 +434,29 @@ Instruction: {instruction}{context_note}"""
                 log_ledger(mode, "", window, "no-speech")
                 return
 
-            # Check for voice commands
             if text.lower() in ("recover", "recover.", "recovery", "recovery."):
                 print("Voice command: recover")
                 log_ledger(mode, text, window, "recover-command")
                 self.recover_audio()
                 return
 
-            # Release any stuck modifiers before typing
             self.platform.release_modifiers()
 
-            # Restore focus to the original window (may have changed during API call)
             self.platform.restore_focus(self.active_app)
 
             if edit:
-                # Edit mode: use transcription as instruction to correct previous text
                 instruction = text
                 print(f"\033[93m◌ Correcting: {instruction}\033[0m", flush=True)
 
                 corrected = self._correct_with_llm(self.last_typed_text, instruction)
                 print(f"\033[94m→ {corrected}\033[0m ({time.time()-t0:.1f}s)", flush=True)
 
-                # Clear the current line
                 self.platform.clear_line()
 
-                # Type corrected text
                 self.platform.type_text(corrected)
                 self.last_typed_text = corrected
                 log_ledger(mode, corrected, window, "typed")
             else:
-                # Normal mode: apply replacements and type
                 text = apply_replacements(text)
                 print(f"\033[94m→ {text}\033[0m ({t1-t0:.1f}s)", flush=True)
 
@@ -489,7 +465,6 @@ Instruction: {instruction}{context_note}"""
                 log_ledger(mode, text, window,
                            "typed+submitted" if submit else "typed")
 
-                # Press Enter if submit mode
                 if submit:
                     import time
                     time.sleep(SUBMIT_DELAY / 1000)
@@ -509,31 +484,25 @@ Instruction: {instruction}{context_note}"""
                 pass
             return
 
-        # Load audio from recovery file
         with wave.open(str(recovery_path), "rb") as wf:
             audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
 
         print(f"Recovering audio from {recovery_path}...")
 
-        # Clear the "no internet" message first
         self.platform.clear_line()
 
-        # Transcribe in background
         threading.Thread(
             target=self._transcribe_and_type, args=(audio, False, False),
             daemon=True,
         ).start()
 
-        # Remove recovery file
         recovery_path.unlink()
 
     def on_press(self, key):
-        # Track modifier keys (include all hotkey modifiers)
         all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS | EDIT_MODIFIERS
         if key in all_modifiers:
             self.pressed_modifiers.add(key)
 
-        # Check if edit hotkey is pressed (Ctrl+Alt+Space or configured)
         if key == EDIT_KEY and _has_all_modifiers(
             self.pressed_modifiers, _edit_modifier_types
         ):
@@ -548,7 +517,6 @@ Instruction: {instruction}{context_note}"""
                     self.start_recording(edit=True)
             return
 
-        # Check if submit hotkey is pressed (Ctrl+Shift+Space or configured)
         if key == SUBMIT_KEY and _has_all_modifiers(
             self.pressed_modifiers, _submit_modifier_types
         ):
@@ -563,7 +531,6 @@ Instruction: {instruction}{context_note}"""
                     self.start_recording(submit=True)
             return
 
-        # Check if hotkey combo is pressed (all required modifiers)
         if key == HOTKEY_KEY and _has_all_modifiers(
             self.pressed_modifiers, _required_modifier_types
         ):
@@ -578,12 +545,10 @@ Instruction: {instruction}{context_note}"""
                     self.start_recording()
 
     def on_release(self, key):
-        # Track modifier release
         all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS | EDIT_MODIFIERS
         if key in all_modifiers:
             self.pressed_modifiers.discard(key)
 
-        # In hold mode, stop when space is released (works for all hotkeys)
         if MODE == "hold" and key in (HOTKEY_KEY, SUBMIT_KEY, EDIT_KEY) and self.hotkey_pressed:
             self.hotkey_pressed = False
             self.stop_recording()
@@ -622,7 +587,6 @@ Instruction: {instruction}{context_note}"""
             print(f"Warning: could not set up wake listener: {e}", flush=True)
 
     def run(self):
-        # Format hotkey names for display
         hotkey_str = "+".join(m.capitalize() for m in _required_modifier_types) + "+Space"
         submit_str = "+".join(m.capitalize() for m in _submit_modifier_types) + "+Space"
         edit_str = "+".join(m.capitalize() for m in _edit_modifier_types) + "+Space"
@@ -660,7 +624,6 @@ def recover():
     platform = get_platform()
     check_environment(platform)
 
-    # Load audio from recovery file
     with wave.open(str(recovery_path), "rb") as wf:
         audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
 
@@ -668,7 +631,6 @@ def recover():
     recorder = VoiceRecorder(platform)
     recorder._transcribe_and_type(audio, submit=False, edit=False)
 
-    # Remove recovery file after successful transcription
     recovery_path.unlink()
     print("Recovery file removed")
 
@@ -686,7 +648,6 @@ def install_agent():
     python_path = sys.executable
     script_path = Path(__file__).resolve()
 
-    # Read API key from config or environment
     api_key_name = "GROQ_API_KEY" if BACKEND == "groq" else "OPENAI_API_KEY"
     api_key = (
         CONFIG.get("transcription", {}).get("api_key", "")
@@ -756,7 +717,6 @@ def uninstall_agent():
 
     plist_path = Path.home() / "Library" / "LaunchAgents" / "com.linux-voice.agent.plist"
 
-    # Try to unload first
     uid = os.getuid()
     subprocess.run(
         ["launchctl", "bootout", f"gui/{uid}/com.linux-voice.agent"],
