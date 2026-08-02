@@ -1,401 +1,147 @@
 # linux-voice
 
-Voice-to-text dictation tool for Linux (X11) using OpenAI Whisper.
+Voice-to-text dictation for Linux/X11 and macOS. It records while a hotkey is
+held, sends the recording to OpenAI or Groq, and inserts the transcription into
+the window that was focused when recording began.
 
-Hold Ctrl+Space to record speech, release to transcribe and type into the focused window.
+Correct, minimal documentation is best. Omission is preferable to an
+unsupported or obsolete claim. Incorrect documentation is worst.
 
-## Requirements
+## Linux installation
 
-- Python 3.11+
-- Linux with X11 (Wayland has limited support)
-- PulseAudio/PipeWire
-- Working microphone
-- OpenAI API key
+The Arch package is the maintained Linux installation. It installs the program
+as `/usr/bin/linux-voice` and the packaged user unit as
+`/usr/lib/systemd/user/linux-voice.service`.
 
-## Installation
-
-### Ubuntu/Debian
-
-```bash
-# System dependencies
-sudo apt install xdotool ffmpeg python3-pip python3-venv
-
-# Create virtual environment (recommended)
-python3 -m venv ~/.local/share/linux-voice
-source ~/.local/share/linux-voice/bin/activate
-
-# Install Python packages
-pip install pynput sounddevice numpy openai
-
-# Download and install script
-curl -o ~/.local/bin/linux-voice https://raw.githubusercontent.com/williamjameshandley/linux-voice/main/linux-voice.py
-chmod +x ~/.local/bin/linux-voice
-```
-
-### Fedora
-
-```bash
-# System dependencies
-sudo dnf install xdotool ffmpeg python3-pip
-
-# Create virtual environment (recommended)
-python3 -m venv ~/.local/share/linux-voice
-source ~/.local/share/linux-voice/bin/activate
-
-# Install Python packages
-pip install pynput sounddevice numpy openai
-
-# Download and install script
-curl -o ~/.local/bin/linux-voice https://raw.githubusercontent.com/williamjameshandley/linux-voice/main/linux-voice.py
-chmod +x ~/.local/bin/linux-voice
-```
-
-### Arch Linux
-
-```bash
-# System dependencies
-sudo pacman -S xdotool ffmpeg python-numpy python-pynput python-sounddevice python-openai
-
-# Download and install script
-curl -o ~/.local/bin/linux-voice https://raw.githubusercontent.com/williamjameshandley/linux-voice/main/linux-voice.py
-chmod +x ~/.local/bin/linux-voice
-```
-
-Or build the package:
-
-```bash
-git clone https://github.com/williamjameshandley/linux-voice
-cd linux-voice
+```sh
 makepkg -si
+systemctl --user enable --now linux-voice.service
 ```
 
-### pip (Any Distribution)
+Provide the API key to the user service through the systemd user manager, for
+example with `~/.config/environment.d/linux-voice.conf`:
 
-```bash
-# Ensure system dependencies are installed first:
-# - xdotool (for typing text)
-# - ffmpeg (for audio compression, optional but recommended)
-
-pip install pynput sounddevice numpy openai
-
-# Download script
-curl -o ~/.local/bin/linux-voice https://raw.githubusercontent.com/williamjameshandley/linux-voice/main/linux-voice.py
-chmod +x ~/.local/bin/linux-voice
+```ini
+OPENAI_API_KEY=...
 ```
 
-### macOS (from scratch)
+Then reload the manager environment and restart the service:
 
-#### 1. Install system dependencies
+```sh
+systemctl --user daemon-reload
+systemctl --user restart linux-voice.service
+```
 
-```bash
+The Linux implementation requires X11, `xdotool`, a working microphone, and an
+OpenAI key by default. Wayland is detected but text injection through `xdotool`
+is not reliable there. `ffmpeg` is used for compressed uploads; without it the
+program sends WAV audio.
+
+## macOS installation
+
+Install `ffmpeg` and `uv`, then install the project with the macOS extra and the
+extra for the selected backend:
+
+```sh
 brew install ffmpeg uv
+uv sync --extra macos --extra groq
 ```
 
-#### 2. Clone and set up the project
+Grant Accessibility permission to `/bin/zsh` and microphone permission when
+prompted. Generate the LaunchAgent from the active environment and start it:
 
-```bash
-git clone https://github.com/williamjameshandley/linux-voice
-cd linux-voice
-uv sync --extra macos --extra groq   # or without --extra groq if using OpenAI
-```
-
-#### 3. Configure
-
-Get a free Groq API key at [groq.com](https://groq.com) (or use an OpenAI key).
-
-```bash
-mkdir -p ~/.config/linux-voice
-cat > ~/.config/linux-voice/config.toml << 'EOF'
-[transcription]
-backend = "groq"
-api_key = "your-groq-api-key-here"
-EOF
-```
-
-For OpenAI, omit the `backend` line and set your OpenAI key as `api_key`.
-
-#### 4. Grant permissions
-
-- **Accessibility:** System Settings > Privacy & Security > Accessibility — add `/bin/zsh` (click `+`, press Cmd+Shift+G, type `/bin/zsh`)
-- **Microphone:** Will be prompted on first run
-
-#### 5. Test manually
-
-```bash
-uv run python linux-voice.py
-```
-
-Hold **Cmd+Shift+Space**, speak, release. Text should appear in the focused window. Press Ctrl+C to stop.
-
-#### 6. Set up auto-start (LaunchAgent)
-
-```bash
+```sh
 uv run python linux-voice.py --install-agent
-```
-
-This auto-generates the LaunchAgent plist with the correct paths and API key. Then start it:
-
-```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.linux-voice.agent.plist
 ```
 
-Voice dictation now works globally in any app via **Cmd+Shift+Space** and starts automatically on login.
+The generated agent runs the current Python and checkout paths. Remove it with:
 
-#### Managing the service
-
-```bash
-# View logs
-tail -f ~/Library/Logs/linux-voice.log
-
-# Restart after code changes
-launchctl kickstart -k gui/$(id -u)/com.linux-voice.agent
-
-# Uninstall (stop + remove)
+```sh
 uv run python linux-voice.py --uninstall-agent
 ```
 
-#### Default hotkeys on macOS
+## Configuration
 
-| Hotkey | Action |
-|--------|--------|
-| `Cmd+Shift+Space` | Hold to record, release to transcribe |
-| `Cmd+Shift+Ctrl+Space` | Record and auto-press Enter |
-| `Cmd+Alt+Space` | Record correction instruction |
+Configuration is read from `~/.config/linux-voice/config.toml`. API keys may be
+provided as `OPENAI_API_KEY` or `GROQ_API_KEY`, or as `api_key` in the
+`[transcription]` table.
 
-### API Key Setup (Linux)
-
-Add to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
-```bash
-export OPENAI_API_KEY="your-key-here"
-```
-
-For the systemd service, create `~/.config/environment.d/openai.conf`:
-```
-OPENAI_API_KEY=your-key-here
-```
-
-## Usage
-
-### Manual
-
-```bash
-linux-voice
-```
-
-If using a virtual environment:
-```bash
-~/.local/share/linux-voice/bin/python ~/.local/bin/linux-voice
-```
-
-### Systemd Service (Auto-start)
-
-Create `~/.config/systemd/user/linux-voice.service`:
-```ini
-[Unit]
-Description=Linux Voice Dictation
-
-[Service]
-ExecStart=%h/.local/bin/linux-voice
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
-
-If using a virtual environment, update `ExecStart`:
-```ini
-ExecStart=%h/.local/share/linux-voice/bin/python %h/.local/bin/linux-voice
-```
-
-Then enable:
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now linux-voice
-
-# Check status
-systemctl --user status linux-voice
-
-# View logs
-journalctl --user -u linux-voice -f
-```
-
-### Modes
-
-- **Hold mode** (default): Hold Ctrl+Space while speaking, release to transcribe
-- **Toggle mode**: Press Ctrl+Space to start recording, press again to stop
-
-```bash
-LINUX_VOICE_MODE=toggle linux-voice
-```
-
-### Submit Hotkey
-
-Use Ctrl+Shift+Space (default) to record and automatically press Enter after typing. Useful for command-line input, chat applications, or any context where you want to submit immediately.
-
-Configure an alternative (e.g., Alt+Space) in `~/.config/linux-voice/config.toml`:
 ```toml
+[transcription]
+backend = "openai"              # or "groq"
+language = "en"
+# model = "whisper-1"
+# llm_model = "gpt-4o-mini"
+# prompt = "Names and domain vocabulary"
+
+[audio]
+sample_rate = 16000
+
+[hotkey]
+key = "space"
+modifiers = ["ctrl"]
+mode = "hold"                  # or "toggle"
+
 [hotkey_submit]
 key = "space"
-modifiers = ["alt"]
-delay = 150  # ms delay before Enter (increase if unreliable)
-```
+modifiers = ["ctrl", "shift"]
+delay = 150
 
-### Edit Hotkey
-
-Use Ctrl+Alt+Space (default) to correct the previous transcription using an LLM. This is useful when Whisper misinterprets a word:
-
-1. Dictate normally with Ctrl+Space → "The function uses a cash mechanism"
-2. Hold Ctrl+Alt+Space and say "change cash to cache"
-3. The original text is cleared and replaced with "The function uses a cache mechanism"
-
-The edit uses the backend's chat model (gpt-4o-mini for OpenAI, llama-3.3-70b-versatile for Groq). The LLM is aware of Unix/programming context and common voice recognition errors (cash→cache, bite→byte, get→git, etc.).
-
-Configure in `~/.config/linux-voice/config.toml`:
-```toml
 [hotkey_edit]
 key = "space"
 modifiers = ["ctrl", "alt"]
 
-[transcription]
-# llm_model = "gpt-4o-mini"  # Override LLM model for corrections
-```
-
-### Offline Recovery
-
-If the internet connection fails during transcription, the audio is saved and you'll see:
-
-```
-(no internet - say 'recover' to retry)
-```
-
-When internet is restored, hold Ctrl+Space and say "recover" to transcribe the saved audio. The recovery file is stored at `/tmp/linux-voice-recovery.wav` and deleted after successful recovery.
-
-### Voice Commands
-
-| Command | Action |
-|---------|--------|
-| "recover" | Transcribe saved audio from a failed attempt |
-
-## Configuration
-
-Create `~/.config/linux-voice/config.toml` to customize:
-
-```toml
-[hotkey]
-key = "space"
-modifiers = ["ctrl"]
-mode = "hold"  # or "toggle"
-
-[hotkey_submit]
-key = "space"
-modifiers = ["ctrl", "shift"]  # Ctrl+Shift+Space by default
-delay = 150                     # ms delay before Enter key
-
-[hotkey_edit]
-key = "space"
-modifiers = ["ctrl", "alt"]    # Ctrl+Alt+Space by default
-
-[audio]
-sample_rate = 16000      # Whisper native rate (don't change unless needed)
-silence_threshold = 150  # RMS threshold for silence detection
-
-[transcription]
-backend = "openai"  # or "groq"
-language = "en"
-# model = "whisper-1"  # or "whisper-large-v3-turbo" for groq
-# llm_model = "gpt-4o-mini"  # or "llama-3.3-70b-versatile" for groq (edit mode)
-# prompt = "Domain-specific vocabulary. Technical terms, jargon, names."
-```
-
-### Backend Options
-
-| Backend | Model | Cost | Latency |
-|---------|-------|------|---------|
-| `openai` | whisper-1 | $0.006/min | ~1-2s |
-| `groq` | whisper-large-v3-turbo | $0.04/hr | ~200ms |
-
-For Groq, set `GROQ_API_KEY` instead of `OPENAI_API_KEY`.
-
-The `prompt` helps Whisper with:
-- British vs American spelling (colour, favour, organisation)
-- Domain-specific vocabulary (your field's jargon)
-- Consistent formatting and punctuation
-
-### Text Replacements
-
-Define regex replacements to convert spoken phrases into special characters or commands:
-
-```toml
 [replacements]
-"^[Ss]lash " = "/"              # "slash compact" → "/compact"
-"^[Ff]orward [Ss]lash " = "/"
-"^(/.*)\\.\\s*$" = "\\1"        # strip period only from /commands
+"^[Ss]lash " = "/"
 ```
 
-This allows saying "slash compact" to type `/compact` for Claude Code commands.
+`LINUX_VOICE_MODE` overrides `hotkey.mode`.
 
-## Privacy and Security
+Default hotkeys are:
 
-**Audio is sent to OpenAI:** All recorded speech is transmitted to OpenAI's Whisper API for transcription. See [OpenAI's data usage policies](https://openai.com/policies/api-data-usage-policies).
+| Action | Linux | macOS |
+| --- | --- | --- |
+| Record and insert | Ctrl+Space | Cmd+Shift+Space |
+| Record, insert, and press Enter | Ctrl+Shift+Space | Cmd+Shift+Ctrl+Space |
+| Correct the previous insertion | Ctrl+Alt+Space | Cmd+Alt+Space |
 
-**Text is typed into the focused window:** Be careful not to dictate sensitive information while password fields or sensitive applications are focused.
+Edit mode transcribes a correction instruction and applies it to the last text
+inserted by the current process. The correction model defaults to
+`gpt-4o-mini` for OpenAI and `llama-3.3-70b-versatile` for Groq.
 
-## Cost
+## Recovery and evidence
 
-OpenAI Whisper API costs $0.006 per minute of audio. A typical 10-second dictation costs ~$0.001.
+If connectivity fails, the program preserves one recording at
+`/tmp/linux-voice-recovery.wav`. Say `recover`, or run
+`linux-voice --recover`, after connectivity returns. A second failed recording
+does not overwrite the first.
 
-## Troubleshooting
+Every transcription outcome is appended to
+`$XDG_STATE_HOME/linux-voice/ledger.jsonl`, or
+`~/.local/state/linux-voice/ledger.jsonl` when `XDG_STATE_HOME` is unset. It
+includes the captured window title and whether text was typed. This is the
+recovery record when text reaches the wrong window or an insertion fails.
 
-### Microphone not working
+## Operations
 
-**Ubuntu/Debian:**
-```bash
-sudo apt install linux-firmware
+On Linux:
+
+```sh
+systemctl --user status linux-voice.service
+journalctl --user -u linux-voice.service -f
 ```
 
-**Fedora:**
-```bash
-sudo dnf install linux-firmware
+On macOS:
+
+```sh
+tail -f ~/Library/Logs/linux-voice.log
+launchctl kickstart -k gui/$(id -u)/com.linux-voice.agent
 ```
 
-**Arch Linux** (modern AMD laptops - Ryzen 6000+, Strix Point):
-```bash
-sudo pacman -S sof-firmware
-```
-
-Then reboot.
-
-### Vim
-
-Ctrl+Space (`C-@`) has a default behavior in vim insert mode (insert previously inserted text). Disable it by adding to your `.vimrc`:
-
-```vim
-" Disable Ctrl+Space insert mode behavior (for linux-voice)
-inoremap <C-@> <Nop>
-```
-
-### Wayland
-
-xdotool has limited Wayland support. Consider using X11 or switching to ydotool.
-
-### Permission errors with pynput
-
-On some systems, you may need to run as root or add your user to the `input` group:
-```bash
-sudo usermod -aG input $USER
-```
-Then log out and back in.
-
-### macOS: Hotkeys not working
-
-- **Accessibility permissions:** Ensure your terminal app is listed in System Settings > Privacy & Security > Accessibility. Remove and re-add it if permissions were reset after a macOS update.
-- **Secure Input Mode:** When a password field is focused or `sudo` is running in terminal, macOS enables Secure Input which blocks global hotkey monitoring. Switch to a different window/app.
-- **Spotlight conflict:** The default `Cmd+Space` is taken by Spotlight. linux-voice defaults to `Cmd+Shift+Space` on macOS to avoid this.
-
-### macOS: Text not appearing
-
-- Text is injected via clipboard paste (`Cmd+V`). If the target app blocks paste, text injection will fail.
-- Some terminal apps (iTerm2) may prompt before pasting multi-line text.
+Audio is sent to the configured transcription provider. Text is injected into
+the focused application, so secure-input fields and applications that reject
+synthetic input can prevent insertion.
 
 ## License
 

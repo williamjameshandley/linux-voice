@@ -29,21 +29,15 @@ source=(
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 package() {
-
-    # Install main script and platform support module
     install -Dm755 linux-voice.py "$pkgdir/usr/lib/$pkgname/linux-voice.py"
     install -Dm644 platform_support.py "$pkgdir/usr/lib/$pkgname/platform_support.py"
 
-    # Create symlink in /usr/bin
     mkdir -p "$pkgdir/usr/bin"
     ln -s "/usr/lib/$pkgname/linux-voice.py" "$pkgdir/usr/bin/linux-voice"
 
-    # Install systemd user service
     install -Dm644 linux-voice.service "$pkgdir/usr/lib/systemd/user/linux-voice.service"
 
-    # Install documentation
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 
-    # Install license
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

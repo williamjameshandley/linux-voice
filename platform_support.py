@@ -158,12 +158,10 @@ class MacOS(PlatformInterface):
             kCGHIDEventTap,
         )
 
-        # Key down
         event = CGEventCreateKeyboardEvent(None, keycode, True)
         if flags:
             CGEventSetFlags(event, flags)
         CGEventPost(kCGHIDEventTap, event)
-        # Key up
         event = CGEventCreateKeyboardEvent(None, keycode, False)
         if flags:
             CGEventSetFlags(event, flags)
@@ -182,7 +180,6 @@ class MacOS(PlatformInterface):
         with objc.autorelease_pool():
             pb = NSPasteboard.generalPasteboard()
 
-            # Save current clipboard
             old_types = pb.types()
             old_contents = {}
             if old_types:
@@ -191,26 +188,23 @@ class MacOS(PlatformInterface):
                     if data:
                         old_contents[t] = data
 
-            # Set clipboard to our text
             pb.clearContents()
             pb.setString_forType_(text, NSPasteboardTypeString)
 
-            # Paste with Cmd+V using CGEvents (keycode 9 = 'v')
             time.sleep(0.05)
             self._post_key_event(9, flags=kCGEventFlagMaskCommand)
 
-            # Wait for paste event to propagate before restoring clipboard
+            # Restoring before the event propagates makes the target paste old data.
             time.sleep(0.25)
 
-            # Restore original clipboard (must declare all types first)
             if old_contents:
+                # AppKit requires declaring all types before restoring their data.
                 pb.declareTypes_owner_(list(old_contents.keys()), None)
                 for ptype, data in old_contents.items():
                     pb.setData_forType_(data, ptype)
 
     def press_key(self, key_name: str):
         """Press a key using CGEvents (targets frontmost app)."""
-        # macOS keycodes
         key_map = {
             "Return": 36,
             "Enter": 36,
@@ -245,13 +239,11 @@ class MacOS(PlatformInterface):
         """
         from Quartz import kCGEventFlagMaskCommand
 
-        # keycode 51 = Delete, with Cmd flag
         self._post_key_event(51, flags=kCGEventFlagMaskCommand)
 
     def check_environment(self) -> list[str]:
         errors = []
 
-        # Check Accessibility permissions
         try:
             from ApplicationServices import AXIsProcessTrusted
 
