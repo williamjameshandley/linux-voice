@@ -128,12 +128,57 @@ class MacOS(PlatformInterface):
         self._keyboard = Controller()
         self._Key = Key
 
+    def _frontmost_app(self):
+        """The active application, resolved live from the window list.
+
+        NSWorkspace answers frontmostApplication() from a snapshot that only
+        refreshes when the process pumps its *main* run loop. A launchd daemon
+        never does, so that value stays frozen at whatever was frontmost when
+        the process started. Neither the window list nor a PID-fetched
+        NSRunningApplication has that cache.
+        """
+        from AppKit import NSRunningApplication
+        from Quartz import (
+            CGWindowListCopyWindowInfo,
+            kCGNullWindowID,
+            kCGWindowListExcludeDesktopElements,
+            kCGWindowListOptionOnScreenOnly,
+        )
+
+        info = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        )
+
+        seen = set()
+        for window in info or []:
+            # Layer 0 is the normal window layer; the list is front-to-back.
+            if window.get("kCGWindowLayer", -1) != 0:
+                continue
+            pid = window.get("kCGWindowOwnerPID")
+            if pid is None or pid in seen:
+                continue
+            seen.add(pid)
+            # Topmost window does not imply focused: the frontmost app may have
+            # no on-screen windows, and invisible helper windows can sit in
+            # front. isActive() is live on an instance fetched by PID (unlike
+            # NSWorkspace's cached view), so it settles the question.
+            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            if app is not None and app.isActive():
+                return app
+        return None
+
     def get_active_app(self):
+        """Return the focused application, or None if it cannot be determined.
+
+        None is deliberate rather than a best guess: restore_focus() no-ops on
+        it and the CGEvent-based injection already targets whatever is really
+        frontmost. Guessing wrong means typing into the wrong window.
+        """
         import objc
-        from AppKit import NSWorkspace
 
         with objc.autorelease_pool():
-            return NSWorkspace.sharedWorkspace().frontmostApplication()
+            return self._frontmost_app()
 
     def restore_focus(self, app_handle):
         if app_handle is None:
