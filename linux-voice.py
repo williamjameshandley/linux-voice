@@ -143,6 +143,22 @@ if LLM_MODEL is None:
     LLM_MODEL = "llama-3.3-70b-versatile" if BACKEND == "groq" else "gpt-4o-mini"
 
 
+def _virtual_keycode(key):
+    """macOS virtual keycode for a pynput key, or None if it has none."""
+    value = getattr(key, "value", key)
+    return getattr(value, "vk", None)
+
+
+# (keycode, required modifier types) for every hotkey, used on macOS to stop the
+# trigger keystroke reaching the focused app. Character keys report no vk and are
+# left alone rather than suppressed on a guess.
+_SUPPRESS_COMBOS = [
+    (_virtual_keycode(HOTKEY_KEY), _required_modifier_types),
+    (_virtual_keycode(SUBMIT_KEY), _submit_modifier_types),
+    (_virtual_keycode(EDIT_KEY), _edit_modifier_types),
+]
+
+
 def apply_replacements(text: str) -> str:
     """Apply user-configured regex replacements."""
     import re
@@ -553,6 +569,42 @@ Instruction: {instruction}{context_note}"""
             self.hotkey_pressed = False
             self.stop_recording()
 
+    def _darwin_intercept(self, event_type, event):
+        """Swallow the hotkey's own key events before the focused app sees them.
+
+        pynput listens passively, so the Space in Cmd+Shift+Space was delivered
+        to the focused application as an ordinary keystroke and inserted a
+        literal space alongside the transcription. Returning None drops the
+        event; every other keystroke is passed through untouched.
+        """
+        from Quartz import (
+            CGEventGetFlags,
+            CGEventGetIntegerValueField,
+            kCGEventFlagMaskAlternate,
+            kCGEventFlagMaskCommand,
+            kCGEventFlagMaskControl,
+            kCGEventFlagMaskShift,
+            kCGKeyboardEventKeycode,
+        )
+
+        keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+        flags = CGEventGetFlags(event)
+
+        held = set()
+        if flags & kCGEventFlagMaskCommand:
+            held.add("super")
+        if flags & kCGEventFlagMaskShift:
+            held.add("shift")
+        if flags & kCGEventFlagMaskControl:
+            held.add("ctrl")
+        if flags & kCGEventFlagMaskAlternate:
+            held.add("alt")
+
+        for vk, required in _SUPPRESS_COMBOS:
+            if vk is not None and keycode == vk and required and required <= held:
+                return None
+        return event
+
     def _setup_wake_listener(self):
         """On macOS, exit on wake from sleep so launchd restarts us.
 
@@ -599,10 +651,17 @@ Instruction: {instruction}{context_note}"""
 
         self._setup_wake_listener()
 
+        listener_kwargs = {}
+        if sys.platform == "darwin":
+            # Makes the event tap active rather than listen-only, so the
+            # hotkey's own keystroke can be suppressed.
+            listener_kwargs["darwin_intercept"] = self._darwin_intercept
+
         try:
             with keyboard.Listener(
                 on_press=self.on_press,
                 on_release=self.on_release,
+                **listener_kwargs,
             ) as listener:
                 listener.join()
         except Exception as e:
