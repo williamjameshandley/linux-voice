@@ -11,6 +11,7 @@ Requires Python 3.11+ for tomllib.
 import io
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -241,6 +242,11 @@ class VoiceRecorder:
         self.last_typed_text = ""  # Store for edit mode corrections
         self.active_app = None  # App/window to type into
         self._consecutive_audio_errors = 0
+        self._hotkey_actions = queue.Queue()
+        self._hotkey_worker = None
+        # Toggle-mode intent, owned by the listener callback thread. self.recording
+        # is set by the worker and so lags the keypress that requested it.
+        self._want_recording = False
 
     def _convert_to_mp3(self, audio: np.ndarray) -> io.BytesIO:
         """Convert numpy audio to MP3 using ffmpeg."""
@@ -306,7 +312,7 @@ Instruction: {instruction}{context_note}"""
             print(f"\033[91mLLM error: {e}\033[0m")
             return original  # Return original on error
 
-    def start_recording(self, submit=False, edit=False):
+    def start_recording(self, submit=False, edit=False, active_app=None):
         if self.recording:
             return
         if edit and not self.last_typed_text:
@@ -315,10 +321,7 @@ Instruction: {instruction}{context_note}"""
         self.audio_data = []
         self.submit_mode = submit
         self.edit_mode = edit
-        try:
-            self.active_app = self.platform.get_active_app()
-        except Exception:
-            self.active_app = None
+        self.active_app = active_app
         if edit:
             indicator = "● Recording edit instruction..."
         elif submit:
@@ -347,11 +350,53 @@ Instruction: {instruction}{context_note}"""
         except Exception as e:
             self.recording = False
             self.hotkey_pressed = False
+            self._want_recording = False
             self._consecutive_audio_errors += 1
             print(f"\033[91mAudio error: {e}\033[0m", flush=True)
             if self._consecutive_audio_errors >= 3:
                 print("Too many audio errors, restarting...", flush=True)
                 os._exit(0)  # launchd KeepAlive will restart us
+
+    def _start_hotkey_worker(self):
+        """Run hotkey actions off the keyboard listener's callback thread.
+
+        On macOS the listener is an active event tap, and macOS permanently
+        disables a tap whose callback overruns roughly one second, with no
+        recovery: the process keeps running but stops receiving keys. Opening
+        the audio device measures around 200ms on a healthy built-in input and
+        is unbounded when a Bluetooth device negotiates or a USB one wakes, so
+        it must not run inside the callback.
+
+        Exactly one worker: serialising the actions is what makes submit_mode
+        and edit_mode safe to hold on the instance, so a second worker would
+        reintroduce the races this avoids.
+        """
+        if self._hotkey_worker is not None:
+            return
+
+        def worker():
+            while True:
+                action, kwargs = self._hotkey_actions.get()
+                try:
+                    action(**kwargs)
+                except Exception as e:
+                    print(f"\033[91mHotkey action error: {e}\033[0m", flush=True)
+
+        self._hotkey_worker = threading.Thread(target=worker, daemon=True)
+        self._hotkey_worker.start()
+
+    def _queue_start(self, **kwargs):
+        # Capture the target window here, on the callback thread, rather than in
+        # start_recording: a backlogged queue would otherwise sample focus when
+        # the action finally runs and type into whatever the user moved to since.
+        try:
+            kwargs["active_app"] = self.platform.get_active_app()
+        except Exception:
+            kwargs["active_app"] = None
+        self._hotkey_actions.put((self.start_recording, kwargs))
+
+    def _queue_stop(self):
+        self._hotkey_actions.put((self.stop_recording, {}))
 
     def stop_recording(self):
         if not self.recording:
@@ -362,9 +407,14 @@ Instruction: {instruction}{context_note}"""
             self.stream.close()
             self.stream = None
 
+        # Bind the target app now. A later recording overwrites self.active_app
+        # while this transcription is still in flight, and restoring focus to
+        # the newer app would paste this text into the wrong window.
+        active_app = self.active_app
+
         if not self.audio_data:
             print("No audio recorded")
-            log_ledger("insert", "", self._window_title(), "no-audio")
+            log_ledger("insert", "", self._window_title(active_app), "no-audio")
             return
 
         audio = np.concatenate(self.audio_data, axis=0)
@@ -372,32 +422,31 @@ Instruction: {instruction}{context_note}"""
         duration = len(audio) / SAMPLE_RATE
         if duration < MIN_RECORDING_SECONDS:
             print(f"(recording too short: {duration:.1f}s)")
-            log_ledger("insert", "", self._window_title(),
+            log_ledger("insert", "", self._window_title(active_app),
                        f"too-short: {duration:.1f}s")
             return
 
         print("\033[93m◌ Processing...\033[0m", flush=True)
 
         threading.Thread(
-            target=self._transcribe_and_type, args=(audio, self.submit_mode, self.edit_mode),
+            target=self._transcribe_and_type,
+            args=(audio, self.submit_mode, self.edit_mode, active_app),
             daemon=True,
         ).start()
 
-    def _window_title(self):
+    def _window_title(self, app_handle):
         """Best-effort human-readable name for the captured focus window."""
         try:
-            return subprocess.run(
-                ["xdotool", "getwindowname", str(self.active_app)],
-                capture_output=True, text=True,
-            ).stdout.strip() or str(self.active_app)
+            return self.platform.describe_app(app_handle)
         except Exception:
-            return str(self.active_app)
+            return str(app_handle)
 
-    def _transcribe_and_type(self, audio: np.ndarray, submit: bool = False, edit: bool = False):
+    def _transcribe_and_type(self, audio: np.ndarray, submit: bool = False,
+                             edit: bool = False, active_app=None):
         import time
         t0 = time.time()
         mode = "edit" if edit else ("submit" if submit else "insert")
-        window = self._window_title()
+        window = self._window_title(active_app)
         try:
             if not check_connectivity():
                 print("\033[91mNo internet connection\033[0m")
@@ -453,12 +502,12 @@ Instruction: {instruction}{context_note}"""
             if text.lower() in ("recover", "recover.", "recovery", "recovery."):
                 print("Voice command: recover")
                 log_ledger(mode, text, window, "recover-command")
-                self.recover_audio()
+                self.recover_audio(active_app)
                 return
 
             self.platform.release_modifiers()
 
-            self.platform.restore_focus(self.active_app)
+            self.platform.restore_focus(active_app)
 
             if edit:
                 instruction = text
@@ -489,7 +538,7 @@ Instruction: {instruction}{context_note}"""
             print(f"\033[91mError: {e}\033[0m")
             log_ledger(mode, "", window, f"error: {e}")
 
-    def recover_audio(self):
+    def recover_audio(self, active_app=None):
         """Recover and transcribe audio from a failed attempt."""
         recovery_path = Path("/tmp/linux-voice-recovery.wav")
         if not recovery_path.exists():
@@ -508,7 +557,8 @@ Instruction: {instruction}{context_note}"""
         self.platform.clear_line()
 
         threading.Thread(
-            target=self._transcribe_and_type, args=(audio, False, False),
+            target=self._transcribe_and_type,
+            args=(audio, False, False, active_app),
             daemon=True,
         ).start()
 
@@ -523,42 +573,48 @@ Instruction: {instruction}{context_note}"""
             self.pressed_modifiers, _edit_modifier_types
         ):
             if MODE == "toggle":
-                if self.recording:
-                    self.stop_recording()
+                if self._want_recording:
+                    self._want_recording = False
+                    self._queue_stop()
                 else:
-                    self.start_recording(edit=True)
+                    self._want_recording = True
+                    self._queue_start(edit=True)
             else:  # hold mode
                 if not self.hotkey_pressed:
                     self.hotkey_pressed = True
-                    self.start_recording(edit=True)
+                    self._queue_start(edit=True)
             return
 
         if key == SUBMIT_KEY and _has_all_modifiers(
             self.pressed_modifiers, _submit_modifier_types
         ):
             if MODE == "toggle":
-                if self.recording:
-                    self.stop_recording()
+                if self._want_recording:
+                    self._want_recording = False
+                    self._queue_stop()
                 else:
-                    self.start_recording(submit=True)
+                    self._want_recording = True
+                    self._queue_start(submit=True)
             else:  # hold mode
                 if not self.hotkey_pressed:
                     self.hotkey_pressed = True
-                    self.start_recording(submit=True)
+                    self._queue_start(submit=True)
             return
 
         if key == HOTKEY_KEY and _has_all_modifiers(
             self.pressed_modifiers, _required_modifier_types
         ):
             if MODE == "toggle":
-                if self.recording:
-                    self.stop_recording()
+                if self._want_recording:
+                    self._want_recording = False
+                    self._queue_stop()
                 else:
-                    self.start_recording()
+                    self._want_recording = True
+                    self._queue_start()
             else:  # hold mode
                 if not self.hotkey_pressed:
                     self.hotkey_pressed = True
-                    self.start_recording()
+                    self._queue_start()
 
     def on_release(self, key):
         all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS | EDIT_MODIFIERS
@@ -567,7 +623,7 @@ Instruction: {instruction}{context_note}"""
 
         if MODE == "hold" and key in (HOTKEY_KEY, SUBMIT_KEY, EDIT_KEY) and self.hotkey_pressed:
             self.hotkey_pressed = False
-            self.stop_recording()
+            self._queue_stop()
 
     def _darwin_intercept(self, event_type, event):
         """Swallow the hotkey's own key events before the focused app sees them.
@@ -650,6 +706,7 @@ Instruction: {instruction}{context_note}"""
         print("Press Ctrl+C to exit\n")
 
         self._setup_wake_listener()
+        self._start_hotkey_worker()
 
         listener_kwargs = {}
         if sys.platform == "darwin":

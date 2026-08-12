@@ -46,6 +46,13 @@ class PlatformInterface(ABC):
         """Clear the current input line."""
 
     @abstractmethod
+    def describe_app(self, app_handle) -> str:
+        """Human-readable name for a handle from get_active_app().
+
+        Recorded in the ledger so a misdirected insertion can be traced.
+        """
+
+    @abstractmethod
     def check_environment(self) -> list[str]:
         """Validate platform-specific requirements.
 
@@ -93,6 +100,18 @@ class LinuxX11(PlatformInterface):
 
     def clear_line(self):
         subprocess.run(["xdotool", "key", "ctrl+u"], check=False)
+
+    def describe_app(self, app_handle) -> str:
+        if not app_handle:
+            return "unknown"
+        try:
+            name = subprocess.run(
+                ["xdotool", "getwindowname", str(app_handle)],
+                capture_output=True, text=True,
+            ).stdout.strip()
+        except Exception:
+            name = ""
+        return name or str(app_handle)
 
     def check_environment(self) -> list[str]:
         import os
@@ -159,10 +178,15 @@ class MacOS(PlatformInterface):
             if pid is None or pid in seen:
                 continue
             seen.add(pid)
-            # Topmost window does not imply focused: the frontmost app may have
-            # no on-screen windows, and invisible helper windows can sit in
-            # front. isActive() is live on an instance fetched by PID (unlike
-            # NSWorkspace's cached view), so it settles the question.
+            # Topmost window does not imply focused: invisible helper windows
+            # and background agents can own the front layer-0 window. isActive()
+            # is live on an instance fetched by PID (unlike NSWorkspace's cached
+            # view), so it identifies the right owner regardless of ordering.
+            #
+            # The candidate set is limited to owners of on-screen windows, so an
+            # active app with no such window (everything minimised, Show Desktop)
+            # is not represented here and this returns None. That is the safe
+            # outcome, not a complete answer.
             app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
             if app is not None and app.isActive():
                 return app
@@ -285,6 +309,20 @@ class MacOS(PlatformInterface):
         from Quartz import kCGEventFlagMaskCommand
 
         self._post_key_event(51, flags=kCGEventFlagMaskCommand)
+
+    def describe_app(self, app_handle) -> str:
+        if app_handle is None:
+            return "unknown"
+        try:
+            import objc
+
+            with objc.autorelease_pool():
+                name = app_handle.localizedName()
+                bundle = app_handle.bundleIdentifier()
+                pid = app_handle.processIdentifier()
+            return f"{name} ({bundle}, pid {pid})" if bundle else f"{name} (pid {pid})"
+        except Exception:
+            return str(app_handle)
 
     def check_environment(self) -> list[str]:
         errors = []
