@@ -348,9 +348,11 @@ Instruction: {instruction}{context_note}"""
             self.recording = True
             self._consecutive_audio_errors = 0
         except Exception as e:
+            # hotkey_pressed and _want_recording belong to the listener callback
+            # thread; clearing them from here races with a newer keypress and can
+            # discard its intent, leaving a release that never stops the stream.
+            # The callback thread clears them on its own release/next press.
             self.recording = False
-            self.hotkey_pressed = False
-            self._want_recording = False
             self._consecutive_audio_errors += 1
             print(f"\033[91mAudio error: {e}\033[0m", flush=True)
             if self._consecutive_audio_errors >= 3:
@@ -397,6 +399,37 @@ Instruction: {instruction}{context_note}"""
 
     def _queue_stop(self):
         self._hotkey_actions.put((self.stop_recording, {}))
+
+    def _can_start(self, submit=False, edit=False):
+        """Reject, on the callback thread, a start the worker would only discard.
+
+        start_recording() guards this too, but the decision has to be made here
+        as well: setting the toggle flag for a start that then early-returns
+        leaves it claiming a recording that never began, and the next press of
+        any hotkey is read as a stop and silently does nothing.
+        """
+        if edit and not self.last_typed_text:
+            print("\033[91mNo previous text to edit\033[0m", flush=True)
+            return False
+        return True
+
+    def _trigger(self, **kwargs):
+        """Act on a hotkey press. Runs on the listener callback thread.
+
+        Toggle state is tracked here rather than read from self.recording, which
+        the worker sets and which therefore lags the keypress that asked for it.
+        """
+        if MODE == "toggle":
+            if self._want_recording:
+                self._want_recording = False
+                self._queue_stop()
+            elif self._can_start(**kwargs):
+                self._want_recording = True
+                self._queue_start(**kwargs)
+        else:  # hold mode
+            if not self.hotkey_pressed and self._can_start(**kwargs):
+                self.hotkey_pressed = True
+                self._queue_start(**kwargs)
 
     def stop_recording(self):
         if not self.recording:
@@ -502,6 +535,11 @@ Instruction: {instruction}{context_note}"""
             if text.lower() in ("recover", "recover.", "recovery", "recovery."):
                 print("Voice command: recover")
                 log_ledger(mode, text, window, "recover-command")
+                # Restore focus first: recover_audio() clears the line to remove
+                # the placeholder it wrote, and that keystroke must land in the
+                # window that holds it rather than wherever the user is now.
+                self.platform.release_modifiers()
+                self.platform.restore_focus(active_app)
                 self.recover_audio(active_app)
                 return
 
@@ -572,49 +610,19 @@ Instruction: {instruction}{context_note}"""
         if key == EDIT_KEY and _has_all_modifiers(
             self.pressed_modifiers, _edit_modifier_types
         ):
-            if MODE == "toggle":
-                if self._want_recording:
-                    self._want_recording = False
-                    self._queue_stop()
-                else:
-                    self._want_recording = True
-                    self._queue_start(edit=True)
-            else:  # hold mode
-                if not self.hotkey_pressed:
-                    self.hotkey_pressed = True
-                    self._queue_start(edit=True)
+            self._trigger(edit=True)
             return
 
         if key == SUBMIT_KEY and _has_all_modifiers(
             self.pressed_modifiers, _submit_modifier_types
         ):
-            if MODE == "toggle":
-                if self._want_recording:
-                    self._want_recording = False
-                    self._queue_stop()
-                else:
-                    self._want_recording = True
-                    self._queue_start(submit=True)
-            else:  # hold mode
-                if not self.hotkey_pressed:
-                    self.hotkey_pressed = True
-                    self._queue_start(submit=True)
+            self._trigger(submit=True)
             return
 
         if key == HOTKEY_KEY and _has_all_modifiers(
             self.pressed_modifiers, _required_modifier_types
         ):
-            if MODE == "toggle":
-                if self._want_recording:
-                    self._want_recording = False
-                    self._queue_stop()
-                else:
-                    self._want_recording = True
-                    self._queue_start()
-            else:  # hold mode
-                if not self.hotkey_pressed:
-                    self.hotkey_pressed = True
-                    self._queue_start()
+            self._trigger()
 
     def on_release(self, key):
         all_modifiers = HOTKEY_MODIFIERS | SUBMIT_MODIFIERS | EDIT_MODIFIERS
@@ -640,8 +648,19 @@ Instruction: {instruction}{context_note}"""
             kCGEventFlagMaskCommand,
             kCGEventFlagMaskControl,
             kCGEventFlagMaskShift,
+            kCGEventTapDisabledByTimeout,
+            kCGEventTapDisabledByUserInput,
             kCGKeyboardEventKeycode,
         )
+
+        # macOS disables an active tap whose callback overran, and pynput never
+        # re-arms it: the process would keep running while receiving no further
+        # keys, with nothing to notice. Exiting hands the problem to the
+        # supervisor, which restarts us with a fresh tap.
+        if event_type in (kCGEventTapDisabledByTimeout,
+                          kCGEventTapDisabledByUserInput):
+            print("Event tap disabled by macOS, restarting...", flush=True)
+            os._exit(0)
 
         keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
         flags = CGEventGetFlags(event)
