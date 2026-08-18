@@ -31,6 +31,11 @@ from pynput import keyboard
 # Minimum recording duration in seconds (avoid accidental triggers)
 MIN_RECORDING_SECONDS = 0.3
 
+# A hotkey action is opening or closing the audio device, measured at ~120ms on
+# a healthy built-in input. Anything past this is not slow, it is wedged: see
+# _start_worker_watchdog.
+WORKER_ACTION_TIMEOUT = 60
+
 CONFIG = {}
 CONFIG_PATH = Path.home() / ".config" / "linux-voice" / "config.toml"
 if CONFIG_PATH.exists():
@@ -244,6 +249,9 @@ class VoiceRecorder:
         self._consecutive_audio_errors = 0
         self._hotkey_actions = queue.Queue()
         self._hotkey_worker = None
+        # Monotonic timestamp at which the worker began its current action, or
+        # None when idle. Written by the worker, read by the watchdog.
+        self._worker_busy_since = None
         # Toggle-mode intent, owned by the listener callback thread. self.recording
         # is set by the worker and so lags the keypress that requested it.
         self._want_recording = False
@@ -379,13 +387,64 @@ Instruction: {instruction}{context_note}"""
         def worker():
             while True:
                 action, kwargs = self._hotkey_actions.get()
+                self._worker_busy_since = time.monotonic()
                 try:
                     action(**kwargs)
                 except Exception as e:
                     print(f"\033[91mHotkey action error: {e}\033[0m", flush=True)
+                finally:
+                    self._worker_busy_since = None
 
         self._hotkey_worker = threading.Thread(target=worker, daemon=True)
         self._hotkey_worker.start()
+
+    def _start_worker_watchdog(self):
+        """Exit if a hotkey action wedges, so the supervisor can restart us.
+
+        PortAudio registers a property listener on the audio unit whose callback
+        re-enters AudioUnitGetProperty. When it fires on CoreAudio's IO thread
+        while we are inside AudioOutputUnitStop, the two lock orders invert and
+        both threads block for good. It is an upstream bug with no fix, and it
+        strands the recording thread rather than raising.
+
+        Nothing else notices: the consecutive-audio-error exit needs an error
+        rather than a hang, the event tap stays healthy so its disable never
+        fires, and KeepAlive sees a live process. The stream cannot be salvaged
+        in place either, because the mutex involved guards the whole process's
+        CoreAudio context, so every later audio call would wedge behind it too.
+        Exiting is the only way out.
+
+        A recording's duration is not spent inside an action: start_recording
+        returns once the device is open, audio accumulates on PortAudio's own
+        thread while the worker waits on the queue, and transcription runs
+        elsewhere. So an action outlasting the timeout is always a wedge, never
+        a long dictation. time.monotonic() excludes system sleep on macOS, so a
+        machine asleep mid-action cannot trip this either.
+        """
+        def watchdog():
+            while True:
+                time.sleep(5)
+                # One read: testing the attribute and then subtracting it
+                # separately would race the worker clearing it.
+                busy_since = self._worker_busy_since
+                if busy_since is None:
+                    continue
+                stuck_for = time.monotonic() - busy_since
+                if stuck_for > WORKER_ACTION_TIMEOUT:
+                    print(
+                        f"\033[91mHotkey worker stuck {stuck_for:.0f}s in an audio "
+                        f"action (CoreAudio deadlock), restarting...\033[0m",
+                        flush=True,
+                    )
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    # Not sys.exit: that unwinds this thread only, and a thread
+                    # blocked in C cannot be killed from Python. No cleanup on
+                    # the way out either, since closing the stream would need
+                    # the very locks that are wedged.
+                    os._exit(0)
+
+        threading.Thread(target=watchdog, daemon=True).start()
 
     def _dispatch(self, action, **kwargs):
         """Run a hotkey action, on the worker thread where there is one.
@@ -740,6 +799,7 @@ Instruction: {instruction}{context_note}"""
         self._setup_wake_listener()
         if sys.platform == "darwin":
             self._start_hotkey_worker()
+            self._start_worker_watchdog()
 
         listener_kwargs = {}
         if sys.platform == "darwin":
