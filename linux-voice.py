@@ -387,6 +387,19 @@ Instruction: {instruction}{context_note}"""
         self._hotkey_worker = threading.Thread(target=worker, daemon=True)
         self._hotkey_worker.start()
 
+    def _dispatch(self, action, **kwargs):
+        """Run a hotkey action, on the worker thread where there is one.
+
+        The worker exists solely to keep macOS's active event tap inside its
+        callback budget. Linux has no such budget - its listener is passive -
+        so there it runs inline, as it always has. Only execution differs: the
+        state machine that decides what to run is shared by both platforms.
+        """
+        if self._hotkey_worker is not None:
+            self._hotkey_actions.put((action, kwargs))
+        else:
+            action(**kwargs)
+
     def _queue_start(self, **kwargs):
         # Capture the target window here, on the callback thread, rather than in
         # start_recording: a backlogged queue would otherwise sample focus when
@@ -395,10 +408,10 @@ Instruction: {instruction}{context_note}"""
             kwargs["active_app"] = self.platform.get_active_app()
         except Exception:
             kwargs["active_app"] = None
-        self._hotkey_actions.put((self.start_recording, kwargs))
+        self._dispatch(self.start_recording, **kwargs)
 
     def _queue_stop(self):
-        self._hotkey_actions.put((self.stop_recording, {}))
+        self._dispatch(self.stop_recording)
 
     def _can_start(self, submit=False, edit=False):
         """Reject, on the callback thread, a start the worker would only discard.
@@ -725,7 +738,8 @@ Instruction: {instruction}{context_note}"""
         print("Press Ctrl+C to exit\n")
 
         self._setup_wake_listener()
-        self._start_hotkey_worker()
+        if sys.platform == "darwin":
+            self._start_hotkey_worker()
 
         listener_kwargs = {}
         if sys.platform == "darwin":
