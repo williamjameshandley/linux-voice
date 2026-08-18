@@ -752,39 +752,6 @@ Instruction: {instruction}{context_note}"""
                 return None
         return event
 
-    def _setup_wake_listener(self):
-        """On macOS, exit on wake from sleep so launchd restarts us.
-
-        This is needed because macOS invalidates Accessibility trust
-        tokens after sleep, causing CGEvents to silently fail.
-        A fresh process gets a new valid token.
-        """
-        if sys.platform != "darwin":
-            return
-        try:
-            from AppKit import NSWorkspace, NSWorkspaceDidWakeNotification
-
-            def on_wake(_notification):
-                print("System wake detected, waiting for Accessibility restore...", flush=True)
-                time.sleep(10)  # wait for macOS to restore Accessibility trust
-                print("Restarting...", flush=True)
-                os._exit(0)  # launchd KeepAlive will restart us
-
-            center = NSWorkspace.sharedWorkspace().notificationCenter()
-            center.addObserverForName_object_queue_usingBlock_(
-                NSWorkspaceDidWakeNotification, None, None, on_wake,
-            )
-
-            # Pump CFRunLoop on a background thread to receive notifications
-            def run_loop():
-                from CoreFoundation import CFRunLoopRun
-                CFRunLoopRun()  # blocks, no CPU spin
-
-            threading.Thread(target=run_loop, daemon=True).start()
-            print("Wake listener active", flush=True)
-        except Exception as e:
-            print(f"Warning: could not set up wake listener: {e}", flush=True)
-
     def run(self):
         hotkey_str = "+".join(m.capitalize() for m in _required_modifier_types) + "+Space"
         submit_str = "+".join(m.capitalize() for m in _submit_modifier_types) + "+Space"
@@ -796,7 +763,6 @@ Instruction: {instruction}{context_note}"""
         print(f"  {edit_str}: record correction instruction")
         print("Press Ctrl+C to exit\n")
 
-        self._setup_wake_listener()
         if sys.platform == "darwin":
             self._start_hotkey_worker()
             self._start_worker_watchdog()
