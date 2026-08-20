@@ -151,10 +151,11 @@ class MacOS(PlatformInterface):
         """The active application, resolved live from the window list.
 
         NSWorkspace answers frontmostApplication() from a snapshot that only
-        refreshes when the process pumps its *main* run loop. A launchd daemon
-        never does, so that value stays frozen at whatever was frontmost when
-        the process started. Neither the window list nor a PID-fetched
-        NSRunningApplication has that cache.
+        refreshes when the process pumps its *main* run loop. This one never
+        does - pynput's listener runs its loop on a background thread while the
+        main thread blocks in listener.join() - so that value can go stale and
+        stop tracking focus for the rest of the process's life. Neither the
+        window list nor a PID-fetched NSRunningApplication has that cache.
         """
         from AppKit import NSRunningApplication
         from Quartz import (
