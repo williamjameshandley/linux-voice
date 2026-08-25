@@ -252,6 +252,9 @@ class VoiceRecorder:
         # Monotonic timestamp at which the worker began its current action, or
         # None when idle. Written by the worker, read by the watchdog.
         self._worker_busy_since = None
+        # Which PortAudio call is in flight, or None. Written by the worker,
+        # read by the watchdog so a wedge reports where it happened.
+        self._audio_phase = None
         # Toggle-mode intent, owned by the listener callback thread. self.recording
         # is set by the worker and so lags the keypress that requested it.
         self._want_recording = False
@@ -344,6 +347,7 @@ Instruction: {instruction}{context_note}"""
             if self.recording:
                 self.audio_data.append(indata.copy())
 
+        self._audio_phase = "opening the audio device"
         try:
             self.stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
@@ -366,6 +370,8 @@ Instruction: {instruction}{context_note}"""
             if self._consecutive_audio_errors >= 3:
                 print("Too many audio errors, restarting...", flush=True)
                 os._exit(0)  # launchd KeepAlive will restart us
+        finally:
+            self._audio_phase = None
 
     def _start_hotkey_worker(self):
         """Run hotkey actions off the keyboard listener's callback thread.
@@ -431,9 +437,10 @@ Instruction: {instruction}{context_note}"""
                     continue
                 stuck_for = time.monotonic() - busy_since
                 if stuck_for > WORKER_ACTION_TIMEOUT:
+                    where = self._audio_phase or "running a hotkey action"
                     print(
-                        f"\033[91mHotkey worker stuck {stuck_for:.0f}s in an audio "
-                        f"action (CoreAudio deadlock), restarting...\033[0m",
+                        f"\033[91mHotkey worker stuck {stuck_for:.0f}s while "
+                        f"{where} (CoreAudio deadlock), restarting...\033[0m",
                         flush=True,
                     )
                     sys.stdout.flush()
@@ -508,8 +515,12 @@ Instruction: {instruction}{context_note}"""
             return
         self.recording = False
         if self.stream:
-            self.stream.stop()
-            self.stream.close()
+            self._audio_phase = "stopping the audio device"
+            try:
+                self.stream.stop()
+                self.stream.close()
+            finally:
+                self._audio_phase = None
             self.stream = None
 
         # Bind the target app now. A later recording overwrites self.active_app
