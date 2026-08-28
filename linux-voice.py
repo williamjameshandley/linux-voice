@@ -742,7 +742,13 @@ Instruction: {instruction}{context_note}"""
         # supervisor, which restarts us with a fresh tap.
         if event_type in (kCGEventTapDisabledByTimeout,
                           kCGEventTapDisabledByUserInput):
-            print("Event tap disabled by macOS, restarting...", flush=True)
+            # Which one matters: ByTimeout means this callback overran macOS's
+            # budget and the fault is ours; ByUserInput means something disabled
+            # the tap out from under us.
+            why = ("callback overran the time budget"
+                   if event_type == kCGEventTapDisabledByTimeout
+                   else "disabled by user input")
+            print(f"Event tap disabled by macOS ({why}), restarting...", flush=True)
             os._exit(0)
 
         keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
