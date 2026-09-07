@@ -323,6 +323,16 @@ Instruction: {instruction}{context_note}"""
             print(f"\033[91mLLM error: {e}\033[0m")
             return original  # Return original on error
 
+    def _open_stream(self, callback):
+        """Open the default input device."""
+        return sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype=np.int16,
+            device=None,
+            callback=callback,
+        )
+
     def start_recording(self, submit=False, edit=False, active_app=None):
         if self.recording:
             return
@@ -349,13 +359,18 @@ Instruction: {instruction}{context_note}"""
 
         self._audio_phase = "opening the audio device"
         try:
-            self.stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype=np.int16,
-                device=None,
-                callback=callback,
-            )
+            try:
+                self.stream = self._open_stream(callback)
+            except Exception:
+                # PortAudio enumerates devices once at startup and caches their
+                # IDs. A device appearing or disappearing - Bluetooth earbuds
+                # connecting, a virtual device from a meeting app - invalidates
+                # them, and every later open fails with kAudioHardwareBadObject
+                # until the process restarts. Re-enumerate and try once more.
+                print("Audio device changed, re-scanning...", flush=True)
+                sd._terminate()
+                sd._initialize()
+                self.stream = self._open_stream(callback)
             self.stream.start()
             self.recording = True
             self._consecutive_audio_errors = 0
